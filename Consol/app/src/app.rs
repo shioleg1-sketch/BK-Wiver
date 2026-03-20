@@ -896,6 +896,7 @@ impl ConsoleApp {
         let desired_height = available.y.max(260.0);
         let desired_size = Vec2::new(available.x.max(320.0), desired_height);
         let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
+        let has_live_frame = self.session_texture.is_some();
 
         let fill = match session.state.as_str() {
             "connected" => Color32::from_rgb(23, 31, 43),
@@ -910,7 +911,7 @@ impl ConsoleApp {
         if let Some(texture) = &self.session_texture {
             painter.image(
                 texture.id(),
-                rect.shrink2(Vec2::new(10.0, 42.0)),
+                rect.shrink2(Vec2::new(8.0, 40.0)),
                 egui::Rect::from_min_max(
                     egui::Pos2::new(0.0, 0.0),
                     egui::Pos2::new(1.0, 1.0),
@@ -946,7 +947,11 @@ impl ConsoleApp {
 
         let (accent, accent_fill) = Self::session_status_colors(&session.state);
         let status_rect = egui::Rect::from_center_size(
-            rect.center_top() + Vec2::new(0.0, 88.0),
+            if has_live_frame {
+                rect.left_top() + Vec2::new(120.0, 54.0)
+            } else {
+                rect.center_top() + Vec2::new(0.0, 88.0)
+            },
             Vec2::new(220.0, 34.0),
         );
         painter.rect_filled(status_rect, CornerRadius::same(17), accent_fill);
@@ -958,43 +963,46 @@ impl ConsoleApp {
             accent,
         );
 
-        painter.text(
-            rect.center_top() + Vec2::new(0.0, 138.0),
-            egui::Align2::CENTER_CENTER,
-            &session.target_host_name,
-            egui::FontId::proportional(26.0),
-            Color32::from_rgb(245, 248, 252),
-        );
+        if has_live_frame {
+            painter.text(
+                rect.left_top() + Vec2::new(26.0, 88.0),
+                egui::Align2::LEFT_TOP,
+                format!("Хост: {}", session.target_host_name),
+                egui::FontId::proportional(18.0),
+                Color32::from_rgb(245, 248, 252),
+            );
+        } else {
+            painter.text(
+                rect.center_top() + Vec2::new(0.0, 138.0),
+                egui::Align2::CENTER_CENTER,
+                &session.target_host_name,
+                egui::FontId::proportional(26.0),
+                Color32::from_rgb(245, 248, 252),
+            );
 
-        painter.text(
-            rect.center_top() + Vec2::new(0.0, 172.0),
-            egui::Align2::CENTER_CENTER,
-            if self.session_texture.is_some() {
-                "Тестовый медиапоток активен"
-            } else {
-                "Полотно удалённого экрана готово для медиапотока"
-            },
-            egui::FontId::proportional(15.0),
-            Color32::from_rgb(192, 202, 213),
-        );
+            painter.text(
+                rect.center_top() + Vec2::new(0.0, 172.0),
+                egui::Align2::CENTER_CENTER,
+                "Полотно удалённого экрана готово для медиапотока",
+                egui::FontId::proportional(15.0),
+                Color32::from_rgb(192, 202, 213),
+            );
 
-        painter.text(
-            rect.center_top() + Vec2::new(0.0, 204.0),
-            egui::Align2::CENTER_CENTER,
-            match session.state.as_str() {
-                "connected" if self.session_texture.is_some() => {
-                    "Host уже передаёт PNG-кадры по media websocket."
-                }
-                "connected" => "Ожидаем первые кадры со стороны Host.",
-                "pending" => "Ожидаем подтверждение со стороны Host.",
-                "demo" => "Работаем в локальном демонстрационном режиме.",
-                "closed" => "Сеанс закрыт.",
-                "rejected" => "Подключение отклонено.",
-                _ => "Ожидаем новое состояние сеанса.",
-            },
-            egui::FontId::proportional(14.0),
-            Color32::from_rgb(170, 181, 193),
-        );
+            painter.text(
+                rect.center_top() + Vec2::new(0.0, 204.0),
+                egui::Align2::CENTER_CENTER,
+                match session.state.as_str() {
+                    "connected" => "Ожидаем первые кадры со стороны Host.",
+                    "pending" => "Ожидаем подтверждение со стороны Host.",
+                    "demo" => "Работаем в локальном демонстрационном режиме.",
+                    "closed" => "Сеанс закрыт.",
+                    "rejected" => "Подключение отклонено.",
+                    _ => "Ожидаем новое состояние сеанса.",
+                },
+                egui::FontId::proportional(14.0),
+                Color32::from_rgb(170, 181, 193),
+            );
+        }
     }
 
     fn session_window(&mut self, ctx: &Context) {
