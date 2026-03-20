@@ -325,6 +325,7 @@ struct ConsoleApp {
     media_rx: Receiver<MediaEvent>,
     media_tx: Sender<MediaEvent>,
     session_texture: Option<TextureHandle>,
+    remote_input_captured: bool,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     signal_tx: Sender<SignalEvent>,
@@ -372,6 +373,7 @@ impl ConsoleApp {
             media_rx,
             media_tx,
             session_texture: None,
+            remote_input_captured: false,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
             signal_tx,
@@ -616,6 +618,7 @@ impl ConsoleApp {
         self.show_session_window = false;
         self.media_connected_session_id = None;
         self.session_texture = None;
+        self.remote_input_captured = false;
         self.apply_hosts(
             demo_hosts(),
             true,
@@ -635,6 +638,7 @@ impl ConsoleApp {
         self.stop_media_listener();
         self.media_connected_session_id = None;
         self.session_texture = None;
+        self.remote_input_captured = false;
 
         if self.using_demo_data || !self.signed_in() {
             self.status_line = if view_only {
@@ -706,6 +710,7 @@ impl ConsoleApp {
             }
             self.stop_media_listener();
             self.media_connected_session_id = None;
+            self.remote_input_captured = false;
             return;
         }
 
@@ -726,6 +731,7 @@ impl ConsoleApp {
                 }
                 self.stop_media_listener();
                 self.media_connected_session_id = None;
+                self.remote_input_captured = false;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
                     session.session_id
@@ -891,12 +897,17 @@ impl ConsoleApp {
         }
     }
 
-    fn remote_view_placeholder(&self, ui: &mut Ui, session: &SessionPreview) {
+    fn remote_view_placeholder(
+        &self,
+        ui: &mut Ui,
+        session: &SessionPreview,
+    ) -> (egui::Response, egui::Rect) {
         let available = ui.available_size_before_wrap();
         let desired_height = available.y.max(260.0);
         let desired_size = Vec2::new(available.x.max(320.0), desired_height);
-        let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
         let has_live_frame = self.session_texture.is_some();
+        let image_rect = rect.shrink2(Vec2::new(8.0, 40.0));
 
         let fill = match session.state.as_str() {
             "connected" => Color32::from_rgb(23, 31, 43),
@@ -911,7 +922,7 @@ impl ConsoleApp {
         if let Some(texture) = &self.session_texture {
             painter.image(
                 texture.id(),
-                rect.shrink2(Vec2::new(8.0, 40.0)),
+                image_rect,
                 egui::Rect::from_min_max(
                     egui::Pos2::new(0.0, 0.0),
                     egui::Pos2::new(1.0, 1.0),
@@ -1003,6 +1014,92 @@ impl ConsoleApp {
                 Color32::from_rgb(170, 181, 193),
             );
         }
+
+        (response, image_rect)
+    }
+
+    fn handle_remote_input(
+        &mut self,
+        ctx: &Context,
+        session: &SessionPreview,
+        response: &egui::Response,
+        image_rect: egui::Rect,
+    ) {
+        if session.state != "connected" || self.using_demo_data {
+            return;
+        }
+
+        let Some(token) = self.access_token.clone() else {
+            return;
+        };
+
+        let server_url = normalize_server_url(&self.server_url);
+
+        if response.clicked() {
+            self.remote_input_captured = true;
+            response.request_focus();
+
+            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                let x_norm =
+                    ((pointer_pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+                let y_norm =
+                    ((pointer_pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+
+                if let Err(error) = signal::send_mouse_click(
+                    &server_url,
+                    &token,
+                    &session.session_id,
+                    x_norm,
+                    y_norm,
+                    "left",
+                ) {
+                    self.status_line = format!("Не удалось отправить клик: {error}");
+                } else {
+                    self.status_line = "Клик отправлен на Host. Ввод закреплён за окном сеанса."
+                        .to_owned();
+                }
+            }
+        }
+
+        if !self.remote_input_captured {
+            return;
+        }
+
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            match event {
+                egui::Event::Text(text) => {
+                    if text.chars().any(|character| !character.is_control())
+                        && let Err(error) = signal::send_key_text(
+                            &server_url,
+                            &token,
+                            &session.session_id,
+                            &text,
+                        )
+                    {
+                        self.status_line = format!("Не удалось отправить текст: {error}");
+                    }
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                } => {
+                    if let Some(named_key) = map_egui_key(key)
+                        && let Err(error) = signal::send_key_named(
+                            &server_url,
+                            &token,
+                            &session.session_id,
+                            named_key,
+                        )
+                    {
+                        self.status_line = format!("Не удалось отправить клавишу: {error}");
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn session_window(&mut self, ctx: &Context) {
@@ -1025,7 +1122,8 @@ impl ConsoleApp {
             .show(ctx, |ui| {
                 ui.columns(2, |columns| {
                     columns[0].vertical(|ui| {
-                        self.remote_view_placeholder(ui, &session);
+                        let (response, image_rect) = self.remote_view_placeholder(ui, &session);
+                        self.handle_remote_input(ctx, &session, &response, image_rect);
                     });
 
                     columns[1].vertical(|ui| {
@@ -1108,9 +1206,9 @@ impl ConsoleApp {
 
                         ui.add_space(10.0);
                         subpanel(ui, "Следующие шаги", |ui| {
-                            ui.label("1. Подключить тестовый media-канал и вывести первые кадры.");
-                            ui.label("2. Передать в это окно координаты мыши и клавиатурные события.");
-                            ui.label("3. После этого включить реальный screen capture на Host.");
+                            ui.label("1. Клик по удалённому экрану уже отправляет мышь на Host.");
+                            ui.label("2. После клика в это окно идут текст, Enter, Backspace, Esc и стрелки.");
+                            ui.label("3. Следующим шагом можно добавить drag, правую кнопку и wheel.");
                         });
 
                         ui.add_space(14.0);
@@ -1125,6 +1223,7 @@ impl ConsoleApp {
                             }
                             if ui.button("Скрыть окно").clicked() {
                                 self.show_session_window = false;
+                                self.remote_input_captured = false;
                             }
                         });
                     });
@@ -1132,6 +1231,9 @@ impl ConsoleApp {
             });
 
         self.show_session_window = open;
+        if !open {
+            self.remote_input_captured = false;
+        }
     }
 
     fn top_bar(&mut self, ctx: &Context) {
@@ -1798,6 +1900,26 @@ fn empty_state(ui: &mut Ui, text: &str) {
                 });
         },
     );
+}
+
+fn map_egui_key(key: egui::Key) -> Option<&'static str> {
+    match key {
+        egui::Key::Enter => Some("enter"),
+        egui::Key::Tab => Some("tab"),
+        egui::Key::Backspace => Some("backspace"),
+        egui::Key::Escape => Some("escape"),
+        egui::Key::Space => Some("space"),
+        egui::Key::ArrowUp => Some("arrow_up"),
+        egui::Key::ArrowDown => Some("arrow_down"),
+        egui::Key::ArrowLeft => Some("arrow_left"),
+        egui::Key::ArrowRight => Some("arrow_right"),
+        egui::Key::Delete => Some("delete"),
+        egui::Key::Home => Some("home"),
+        egui::Key::End => Some("end"),
+        egui::Key::PageUp => Some("page_up"),
+        egui::Key::PageDown => Some("page_down"),
+        _ => None,
+    }
 }
 
 fn normalize_server_url(value: &str) -> String {

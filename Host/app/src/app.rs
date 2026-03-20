@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use eframe::{
     App, NativeOptions,
     egui::{self, Align, Color32, Layout, RichText, Stroke, ViewportCommand},
@@ -17,6 +18,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use screenshots::Screen;
 use tray_icon::{
     TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -521,8 +523,114 @@ impl HostApp {
                         current_signal_status,
                     );
                 }
+                SignalEvent::MouseInput {
+                    session_id,
+                    action,
+                    button,
+                    x_norm,
+                    y_norm,
+                } => {
+                    match self.apply_mouse_input(x_norm, y_norm, &button, &action) {
+                        Ok(()) => {
+                            self.status_line = format!(
+                                "Выполнена команда мыши для сеанса {session_id}."
+                            );
+                        }
+                        Err(error) => {
+                            self.status_line = format!(
+                                "Не удалось применить мышь для сеанса {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                SignalEvent::KeyInput {
+                    session_id,
+                    kind,
+                    key,
+                    text,
+                } => match self.apply_key_input(&kind, &key, &text) {
+                    Ok(()) => {
+                        self.status_line =
+                            format!("Выполнена клавиатурная команда для сеанса {session_id}.");
+                    }
+                    Err(error) => {
+                        self.status_line = format!(
+                            "Не удалось применить клавиатуру для сеанса {session_id}: {error}"
+                        );
+                    }
+                },
             }
         }
+    }
+
+    fn apply_mouse_input(
+        &self,
+        x_norm: f32,
+        y_norm: f32,
+        button: &str,
+        action: &str,
+    ) -> Result<(), String> {
+        let screen = select_primary_screen().ok_or_else(|| "экран не найден".to_owned())?;
+        let info = screen.display_info;
+        let width = info.width.max(1) as f32;
+        let height = info.height.max(1) as f32;
+        let x = info.x + (x_norm.clamp(0.0, 1.0) * width).round() as i32;
+        let y = info.y + (y_norm.clamp(0.0, 1.0) * height).round() as i32;
+
+        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
+        enigo
+            .move_mouse(x, y, Coordinate::Abs)
+            .map_err(|error| error.to_string())?;
+
+        let button = match button {
+            "right" => Button::Right,
+            "middle" => Button::Middle,
+            _ => Button::Left,
+        };
+        let direction = match action {
+            "press" => Direction::Press,
+            "release" => Direction::Release,
+            _ => Direction::Click,
+        };
+
+        enigo
+            .button(button, direction)
+            .map_err(|error| error.to_string())
+    }
+
+    fn apply_key_input(&self, kind: &str, key: &str, text: &str) -> Result<(), String> {
+        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
+        match kind {
+            "text" => {
+                if !text.is_empty() {
+                    enigo.text(text).map_err(|error| error.to_string())?;
+                }
+            }
+            _ => {
+                let key = match key {
+                    "enter" => Key::Return,
+                    "tab" => Key::Tab,
+                    "backspace" => Key::Backspace,
+                    "escape" => Key::Escape,
+                    "space" => Key::Space,
+                    "arrow_up" => Key::UpArrow,
+                    "arrow_down" => Key::DownArrow,
+                    "arrow_left" => Key::LeftArrow,
+                    "arrow_right" => Key::RightArrow,
+                    "delete" => Key::Delete,
+                    "home" => Key::Home,
+                    "end" => Key::End,
+                    "page_up" => Key::PageUp,
+                    "page_down" => Key::PageDown,
+                    _ => return Ok(()),
+                };
+                enigo
+                    .key(key, Direction::Click)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+
+        Ok(())
     }
 
     fn start_test_media_stream(&mut self, session_id: &str) {
@@ -911,6 +1019,15 @@ fn format_ms(value: u64, zero_label: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn select_primary_screen() -> Option<Screen> {
+    let screens = Screen::all().ok()?;
+    screens
+        .iter()
+        .find(|screen| screen.display_info.is_primary)
+        .copied()
+        .or_else(|| screens.into_iter().next())
 }
 
 fn publish_service_status(state: &str, message: &str) -> Result<(), String> {

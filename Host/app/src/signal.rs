@@ -16,6 +16,19 @@ pub enum SignalEvent {
     SessionClosed {
         session_id: String,
     },
+    MouseInput {
+        session_id: String,
+        action: String,
+        button: String,
+        x_norm: f32,
+        y_norm: f32,
+    },
+    KeyInput {
+        session_id: String,
+        kind: String,
+        key: String,
+        text: String,
+    },
 }
 
 pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<SignalEvent>) {
@@ -102,6 +115,39 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
         }),
         "session.closed" => Some(SignalEvent::SessionClosed {
             session_id: payload.get("sessionId")?.as_str()?.to_owned(),
+        }),
+        "session.input_mouse" => Some(SignalEvent::MouseInput {
+            session_id: payload.get("sessionId")?.as_str()?.to_owned(),
+            action: payload
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("click")
+                .to_owned(),
+            button: payload
+                .get("button")
+                .and_then(Value::as_str)
+                .unwrap_or("left")
+                .to_owned(),
+            x_norm: payload.get("xNorm").and_then(Value::as_f64).unwrap_or(0.5) as f32,
+            y_norm: payload.get("yNorm").and_then(Value::as_f64).unwrap_or(0.5) as f32,
+        }),
+        "session.input_key" => Some(SignalEvent::KeyInput {
+            session_id: payload.get("sessionId")?.as_str()?.to_owned(),
+            kind: payload
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("named")
+                .to_owned(),
+            key: payload
+                .get("key")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            text: payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }),
         _ => None,
     }

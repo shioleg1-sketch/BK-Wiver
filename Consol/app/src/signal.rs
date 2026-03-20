@@ -71,7 +71,65 @@ pub fn send_session_closed(server_url: &str, token: &str, session_id: &str) -> R
     )
 }
 
-fn send_message(server_url: &str, token: &str, payload: Value) -> Result<(), String> {
+pub fn send_mouse_click(
+    server_url: &str,
+    token: &str,
+    session_id: &str,
+    x_norm: f32,
+    y_norm: f32,
+    button: &str,
+) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.input_mouse",
+            "sessionId": session_id,
+            "action": "click",
+            "button": button,
+            "xNorm": x_norm,
+            "yNorm": y_norm,
+        }),
+    )
+}
+
+pub fn send_key_text(
+    server_url: &str,
+    token: &str,
+    session_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.input_key",
+            "sessionId": session_id,
+            "kind": "text",
+            "text": text,
+        }),
+    )
+}
+
+pub fn send_key_named(
+    server_url: &str,
+    token: &str,
+    session_id: &str,
+    key: &str,
+) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.input_key",
+            "sessionId": session_id,
+            "kind": "named",
+            "key": key,
+        }),
+    )
+}
+
+pub fn send_message(server_url: &str, token: &str, payload: Value) -> Result<(), String> {
     let url = signal_url(server_url, token)?;
     let (mut socket, _) = connect(url.as_str()).map_err(|error| error.to_string())?;
     socket
