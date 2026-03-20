@@ -588,6 +588,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bk-wiver-console-macos"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "image 0.24.9",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tungstenite 0.24.0",
+ "url",
+]
+
+[[package]]
 name = "bk-wiver-host"
 version = "0.1.0"
 dependencies = [

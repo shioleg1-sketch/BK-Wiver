@@ -30,7 +30,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eframe::run_native(
-        "BK-Console",
+        app_brand_name(),
         options,
         Box::new(|cc| Ok(Box::new(ConsoleApp::new(cc)))),
     )?;
@@ -704,7 +704,7 @@ impl ConsoleApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("BK-Console")
+                        RichText::new(app_brand_name())
                             .size(22.0)
                             .strong()
                             .color(Color32::from_rgb(37, 54, 74)),
@@ -1181,6 +1181,18 @@ impl From<DeviceSummary> for HostRecord {
             state,
             permissions: value.permissions,
         }
+    }
+}
+
+fn app_brand_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "BK-Console macOS"
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "BK-Console"
     }
 }
 

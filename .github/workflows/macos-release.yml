@@ -1,0 +1,37 @@
+name: macOS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure build script is executable
+        run: chmod +x ConsolMac/installer/macos/build_console_macos.sh
+
+      - name: Build macOS installer
+        run: ./ConsolMac/installer/macos/build_console_macos.sh
+
+      - name: Create GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ConsolMac/dist/BK-Console macOS.dmg
+          append_body: true
