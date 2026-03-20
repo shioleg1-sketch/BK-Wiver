@@ -123,7 +123,7 @@ fn capture_primary_screen_gdi(max_dimensions: (u32, u32)) -> Result<RgbaImage, S
             biClrUsed: 0,
             biClrImportant: 0,
         },
-        bmiColors: [Default::default(); 1],
+        bmiColors: [unsafe { std::mem::zeroed() }; 1],
     };
 
     let mut bgra = vec![0_u8; (width as usize) * (height as usize) * 4];
