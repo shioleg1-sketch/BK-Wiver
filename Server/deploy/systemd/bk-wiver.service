@@ -1,0 +1,16 @@
+[Unit]
+Description=BK-Wiver Docker Compose Stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bk-wiver
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f Server/deploy/docker-compose.lan.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f Server/deploy/docker-compose.lan.yml down
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

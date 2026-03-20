@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: bk-wiver-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bkwiver}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - bk_wiver_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-bkwiver}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Server/app/Dockerfile
+    container_name: bk-wiver-server
+    restart: unless-stopped
+    environment:
+      BK_WIVER_SERVER_ADDR: 0.0.0.0:8080
+      BK_WIVER_SERVER_URL: ${SERVER_PUBLIC_URL:-http://localhost:${SERVER_PORT:-8080}}
+      BK_WIVER_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bkwiver}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  bk_wiver_postgres_data:

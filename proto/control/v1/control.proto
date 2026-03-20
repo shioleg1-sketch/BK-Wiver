@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package bkwiver.control.v1;
+
+option java_multiple_files = true;
+option java_package = "org.bkwiver.control.v1";
+
+message DeviceId {
+  string value = 1;
+}
+
+message SessionId {
+  string value = 1;
+}
+
+message UserId {
+  string value = 1;
+}
+
+message EnrollmentTokenId {
+  string value = 1;
+}
+
+message DesktopVersion {
+  string version = 1;
+  string commit = 2;
+}
+
+message HostInfo {
+  string hostname = 1;
+  string os = 2;
+  string os_version = 3;
+  string arch = 4;
+  string username = 5;
+}
+
+message DeviceSummary {
+  DeviceId device_id = 1;
+  string device_name = 2;
+  HostInfo host_info = 3;
+  bool online = 4;
+  uint64 last_seen_ms = 5;
+  PermissionStatus permissions = 6;
+}
+
+message PermissionStatus {
+  bool screen_capture = 1;
+  bool input_control = 2;
+  bool accessibility = 3;
+  bool file_transfer = 4;
+}
+
+message DeviceRegistrationRequest {
+  string enrollment_token = 1;
+  DesktopVersion desktop_version = 2;
+  HostInfo host_info = 3;
+  PermissionStatus permissions = 4;
+}
+
+message DeviceRegistrationResponse {
+  DeviceId device_id = 1;
+  string device_name = 2;
+  string server_url = 3;
+  string device_token = 4;
+  int32 heartbeat_interval_sec = 5;
+}
+
+message DeviceHeartbeat {
+  DeviceId device_id = 1;
+  string device_token = 2;
+  PermissionStatus permissions = 3;
+  uint64 unix_time_ms = 4;
+}
+
+message DeviceStatus {
+  DeviceId device_id = 1;
+  bool online = 2;
+  HostInfo host_info = 3;
+  PermissionStatus permissions = 4;
+  uint64 last_seen_ms = 5;
+}
+
+message DesktopLoginRequest {
+  string login = 1;
+  string password = 2;
+  DesktopVersion desktop_version = 3;
+}
+
+message DesktopLoginResponse {
+  UserId user_id = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+}
+
+message ListDevicesRequest {
+  string access_token = 1;
+}
+
+message ListDevicesResponse {
+  repeated DeviceSummary devices = 1;
+}
+
+message CreateSessionRequest {
+  DeviceId device_id = 1;
+  UserId user_id = 2;
+  string access_token = 3;
+}
+
+message CreateSessionResponse {
+  SessionId session_id = 1;
+  string session_token = 2;
+  uint64 expires_at_ms = 3;
+}
+
+message IceCandidate {
+  string candidate = 1;
+  string sdp_mid = 2;
+  int32 sdp_mline_index = 3;
+}
+
+message SessionOffer {
+  SessionId session_id = 1;
+  string sdp = 2;
+}
+
+message SessionAnswer {
+  SessionId session_id = 1;
+  string sdp = 2;
+}
+
+message SessionSignal {
+  oneof payload {
+    SessionOffer offer = 1;
+    SessionAnswer answer = 2;
+    IceCandidate ice_candidate = 3;
+  }
+}
+
+message EnrollmentToken {
+  EnrollmentTokenId token_id = 1;
+  string token = 2;
+  string comment = 3;
+  uint64 expires_at_ms = 4;
+  bool single_use = 5;
+}
+
+message CreateEnrollmentTokenRequest {
+  string access_token = 1;
+  string comment = 2;
+  uint64 expires_at_ms = 3;
+  bool single_use = 4;
+}
+
+message CreateEnrollmentTokenResponse {
+  EnrollmentToken enrollment_token = 1;
+}
+
+message AuditEvent {
+  string event_id = 1;
+  string actor_type = 2;
+  string actor_id = 3;
+  string action = 4;
+  string target_type = 5;
+  string target_id = 6;
+  uint64 created_at_ms = 7;
+}
+
+message ListAuditEventsRequest {
+  string access_token = 1;
+  uint32 limit = 2;
+}
+
+message ListAuditEventsResponse {
+  repeated AuditEvent events = 1;
+}

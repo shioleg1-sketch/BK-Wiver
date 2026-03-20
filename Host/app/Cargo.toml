@@ -1,0 +1,25 @@
+[package]
+name = "bk-wiver-host"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+crossbeam-channel = "0.5"
+enigo = "0.2.1"
+eframe = { version = "0.33", features = ["wgpu"] }
+egui = "0.33"
+image = "0.24.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+screenshots = "0.8.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tray-icon = "0.19"
+tungstenite = "0.24"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
