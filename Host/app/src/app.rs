@@ -98,6 +98,7 @@ struct AgentRuntimeStatus {
 struct HostMediaSession {
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<media::StreamProfile>>,
+    codec_preference: Arc<Mutex<media::StreamCodec>>,
 }
 
 enum HostUiCommand {
@@ -576,8 +577,9 @@ impl HostApp {
                 SignalEvent::MediaFeedback {
                     session_id,
                     profile,
+                    codec,
                 } => {
-                    self.update_media_profile(&session_id, &profile);
+                    self.update_media_preferences(&session_id, &profile, codec.as_deref());
                 }
             }
         }
@@ -685,28 +687,47 @@ impl HostApp {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let profile = Arc::new(Mutex::new(media::StreamProfile::Balanced));
+        let codec_preference = Arc::new(Mutex::new(media::StreamCodec::Auto));
         media::spawn_stream(
             self.registration.server_url.clone(),
             self.registration.device_token.clone(),
             session_id.to_owned(),
             stop_flag.clone(),
             profile.clone(),
+            codec_preference.clone(),
         );
         self.media_sessions.insert(
             session_id.to_owned(),
-            HostMediaSession { stop_flag, profile },
+            HostMediaSession {
+                stop_flag,
+                profile,
+                codec_preference,
+            },
         );
     }
 
-    fn update_media_profile(&mut self, session_id: &str, profile: &str) {
-        if let Some(session) = self.media_sessions.get(session_id)
-            && let Ok(mut current_profile) = session.profile.lock()
-        {
-            *current_profile = media::StreamProfile::from_wire(profile);
-            self.status_line = format!(
-                "Профиль качества для сеанса {session_id} переключён на {}.",
-                current_profile.wire_name()
-            );
+    fn update_media_preferences(&mut self, session_id: &str, profile: &str, codec: Option<&str>) {
+        if let Some(session) = self.media_sessions.get(session_id) {
+            let mut status_parts = Vec::new();
+
+            if let Ok(mut current_profile) = session.profile.lock() {
+                *current_profile = media::StreamProfile::from_wire(profile);
+                status_parts.push(format!("качество {}", current_profile.wire_name()));
+            }
+
+            if let Some(codec) = codec
+                && let Ok(mut current_codec) = session.codec_preference.lock()
+            {
+                *current_codec = media::StreamCodec::from_wire(codec);
+                status_parts.push(format!("codec {codec}"));
+            }
+
+            if !status_parts.is_empty() {
+                self.status_line = format!(
+                    "Параметры media для сеанса {session_id}: {}.",
+                    status_parts.join(", ")
+                );
+            }
         }
     }
 

@@ -28,14 +28,23 @@ const MEDIA_PACKET_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
+    Auto,
     Jpeg,
     H264,
 }
 
 impl StreamCodec {
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "jpeg" => Self::Jpeg,
+            "h264" => Self::H264,
+            _ => Self::Auto,
+        }
+    }
+
     fn code(self) -> u8 {
         match self {
-            Self::Jpeg => 1,
+            Self::Auto | Self::Jpeg => 1,
             Self::H264 => 2,
         }
     }
@@ -236,6 +245,7 @@ pub fn spawn_stream(
     session_id: String,
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<StreamProfile>>,
+    codec_preference: Arc<Mutex<StreamCodec>>,
 ) {
     thread::spawn(move || {
         let Ok(url) = media_url(&server_url, &token, &session_id) else {
@@ -245,8 +255,6 @@ pub fn spawn_stream(
         let mut frame_index = 0_u32;
         let mut active_screen = select_capture_screen();
         let mut previous_signature: Option<Vec<u8>> = None;
-        let mut preferred_codec = StreamCodec::H264;
-
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
@@ -254,6 +262,10 @@ pub fn spawn_stream(
                     while !stop_flag.load(Ordering::Relaxed) {
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
+                        let preferred_codec = codec_preference
+                            .lock()
+                            .map(|guard| *guard)
+                            .unwrap_or(StreamCodec::Auto);
 
                         let frame_image = match active_screen.as_ref() {
                             Some(screen) => match capture_screen_image(screen, stream_profile) {
@@ -278,7 +290,9 @@ pub fn spawn_stream(
                         previous_signature = Some(signature);
 
                         let mut sent_frame = false;
-                        if preferred_codec == StreamCodec::H264 {
+                        let should_try_h264 =
+                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264);
+                        if should_try_h264 {
                             match ensure_h264_encoder(
                                 &mut h264_encoder,
                                 &mut socket,
@@ -303,13 +317,11 @@ pub fn spawn_stream(
                                                 sent_frame = true;
                                             }
                                         } else {
-                                            preferred_codec = StreamCodec::Jpeg;
                                             h264_encoder = None;
                                         }
                                     }
                                 }
                                 Err(_) => {
-                                    preferred_codec = StreamCodec::Jpeg;
                                     h264_encoder = None;
                                 }
                             }

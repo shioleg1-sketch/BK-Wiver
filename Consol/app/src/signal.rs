@@ -139,6 +139,7 @@ pub fn send_media_feedback(
     token: &str,
     session_id: &str,
     profile: &str,
+    codec: &str,
 ) -> Result<(), String> {
     send_message(
         server_url,
@@ -147,6 +148,7 @@ pub fn send_media_feedback(
             "type": "session.media_feedback",
             "sessionId": session_id,
             "profile": profile,
+            "codec": codec,
         }),
     )
 }

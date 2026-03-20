@@ -115,6 +115,31 @@ enum StreamQualityProfile {
     Sharp,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StreamCodecPreference {
+    Auto,
+    Jpeg,
+    H264,
+}
+
+impl StreamCodecPreference {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Jpeg => "jpeg",
+            Self::H264 => "h264",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Jpeg => "JPEG",
+            Self::H264 => "H.264",
+        }
+    }
+}
+
 impl StreamQualityProfile {
     fn wire_name(self) -> &'static str {
         match self {
@@ -352,6 +377,7 @@ struct ConsoleApp {
     media_tx: Sender<MediaEvent>,
     session_texture: Option<TextureHandle>,
     stream_quality_profile: StreamQualityProfile,
+    stream_codec_preference: StreamCodecPreference,
     remote_input_captured: bool,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
@@ -402,6 +428,7 @@ impl ConsoleApp {
             media_tx,
             session_texture: None,
             stream_quality_profile: StreamQualityProfile::Balanced,
+            stream_codec_preference: StreamCodecPreference::Auto,
             remote_input_captured: false,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
@@ -675,6 +702,7 @@ impl ConsoleApp {
         self.media_codec = None;
         self.session_texture = None;
         self.stream_quality_profile = StreamQualityProfile::Balanced;
+        self.stream_codec_preference = StreamCodecPreference::Auto;
         self.remote_input_captured = false;
 
         if self.using_demo_data || !self.signed_in() {
@@ -1244,12 +1272,14 @@ impl ConsoleApp {
             &token,
             &session.session_id,
             self.stream_quality_profile.wire_name(),
+            self.stream_codec_preference.wire_name(),
         ) {
             self.status_line = format!("Не удалось переключить профиль качества: {error}");
         } else {
             self.status_line = format!(
-                "Профиль качества переключён на {}.",
-                self.stream_quality_profile.label()
+                "Параметры потока: {} / {}.",
+                self.stream_quality_profile.label(),
+                self.stream_codec_preference.label()
             );
         }
     }
@@ -1319,6 +1349,7 @@ impl ConsoleApp {
                             });
                             ui.separator();
                             let previous_profile = self.stream_quality_profile;
+                            let previous_codec = self.stream_codec_preference;
                             egui::ComboBox::from_id_salt("session_quality_profile")
                                 .selected_text(self.stream_quality_profile.label())
                                 .show_ui(ui, |ui| {
@@ -1338,7 +1369,29 @@ impl ConsoleApp {
                                         StreamQualityProfile::Sharp.label(),
                                     );
                                 });
-                            if self.stream_quality_profile != previous_profile {
+                            ui.separator();
+                            egui::ComboBox::from_id_salt("session_codec_preference")
+                                .selected_text(self.stream_codec_preference.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::Auto,
+                                        StreamCodecPreference::Auto.label(),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::Jpeg,
+                                        StreamCodecPreference::Jpeg.label(),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::H264,
+                                        StreamCodecPreference::H264.label(),
+                                    );
+                                });
+                            if self.stream_quality_profile != previous_profile
+                                || self.stream_codec_preference != previous_codec
+                            {
                                 self.sync_stream_profile(&session);
                             }
                         });

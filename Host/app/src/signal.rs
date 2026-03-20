@@ -34,6 +34,7 @@ pub enum SignalEvent {
     MediaFeedback {
         session_id: String,
         profile: String,
+        codec: Option<String>,
     },
 }
 
@@ -170,6 +171,7 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("balanced")
                 .to_owned(),
+            codec: payload.get("codec").and_then(Value::as_str).map(str::to_owned),
         }),
         _ => None,
     }
