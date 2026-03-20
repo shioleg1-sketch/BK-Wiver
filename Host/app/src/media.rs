@@ -108,25 +108,25 @@ impl StreamProfile {
 
     fn active_frame_delay(self) -> Duration {
         match self {
-            Self::Fast => Duration::from_millis(55),
-            Self::Balanced => Duration::from_millis(75),
-            Self::Sharp => Duration::from_millis(95),
+            Self::Fast => Duration::from_millis(28),
+            Self::Balanced => Duration::from_millis(34),
+            Self::Sharp => Duration::from_millis(48),
         }
     }
 
     fn idle_frame_delay(self) -> Duration {
         match self {
-            Self::Fast => Duration::from_millis(140),
-            Self::Balanced => Duration::from_millis(180),
-            Self::Sharp => Duration::from_millis(230),
+            Self::Fast => Duration::from_millis(90),
+            Self::Balanced => Duration::from_millis(120),
+            Self::Sharp => Duration::from_millis(160),
         }
     }
 
     fn target_fps(self) -> u32 {
         match self {
-            Self::Fast => 24,
-            Self::Balanced => 18,
-            Self::Sharp => 14,
+            Self::Fast => 36,
+            Self::Balanced => 30,
+            Self::Sharp => 22,
         }
     }
 }
@@ -171,17 +171,41 @@ impl H264EncoderSession {
             .arg("-c:v")
             .arg("libx264")
             .arg("-preset")
-            .arg("veryfast")
+            .arg("ultrafast")
             .arg("-tune")
             .arg("zerolatency")
+            .arg("-profile:v")
+            .arg("baseline")
             .arg("-pix_fmt")
             .arg("yuv420p")
+            .arg("-bf")
+            .arg("0")
+            .arg("-refs")
+            .arg("1")
+            .arg("-crf")
+            .arg(match profile {
+                StreamProfile::Fast => "29",
+                StreamProfile::Balanced => "26",
+                StreamProfile::Sharp => "23",
+            })
+            .arg("-maxrate")
+            .arg(match profile {
+                StreamProfile::Fast => "1800k",
+                StreamProfile::Balanced => "3000k",
+                StreamProfile::Sharp => "4500k",
+            })
+            .arg("-bufsize")
+            .arg(match profile {
+                StreamProfile::Fast => "900k",
+                StreamProfile::Balanced => "1500k",
+                StreamProfile::Sharp => "2200k",
+            })
             .arg("-g")
             .arg(profile.target_fps().to_string())
             .arg("-keyint_min")
             .arg(profile.target_fps().to_string())
             .arg("-x264-params")
-            .arg("scenecut=0:repeat-headers=1")
+            .arg("scenecut=0:repeat-headers=1:bframes=0:sync-lookahead=0:rc-lookahead=0:sliced-threads=1")
             .arg("-f")
             .arg("h264")
             .arg("pipe:1")
@@ -302,7 +326,7 @@ pub fn spawn_stream(
                         let signature = frame_signature(frame_image.as_raw());
                         let is_active = previous_signature
                             .as_ref()
-                            .map(|previous| signature_distance(previous, &signature) > 18)
+                            .map(|previous| signature_distance(previous, &signature) > 4)
                             .unwrap_or(true);
                         previous_signature = Some(signature);
 
