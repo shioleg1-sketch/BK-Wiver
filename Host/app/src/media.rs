@@ -273,13 +273,19 @@ pub fn spawn_stream(
         };
 
         let mut frame_index = 0_u32;
+        let mut stream_tick = 0_u64;
         let mut active_screen = select_capture_screen();
         let mut previous_signature: Option<Vec<u8>> = None;
+        let mut h264_no_output_streak: u32;
+        let mut h264_packets_sent = 0_u64;
+        let mut h264_restart_allowed_at_tick = 0_u64;
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_encoder: Option<H264EncoderSession> = None;
+                    h264_no_output_streak = 0;
                     while !stop_flag.load(Ordering::Relaxed) {
+                        stream_tick = stream_tick.saturating_add(1);
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
                         let preferred_codec = codec_preference
@@ -311,7 +317,8 @@ pub fn spawn_stream(
 
                         let mut sent_frame = false;
                         let should_try_h264 =
-                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264);
+                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264)
+                                && stream_tick >= h264_restart_allowed_at_tick;
                         if should_try_h264 {
                             match ensure_h264_encoder(
                                 &mut h264_encoder,
@@ -323,7 +330,28 @@ pub fn spawn_stream(
                                 Ok(()) => {
                                     if let Some(encoder) = &mut h264_encoder {
                                         if encoder.push_frame(&frame_image).is_ok() {
-                                            for packet in encoder.drain_packets() {
+                                            let packets = encoder.drain_packets();
+                                            if packets.is_empty() {
+                                                h264_no_output_streak =
+                                                    h264_no_output_streak.saturating_add(1);
+                                                if h264_no_output_streak >= 8 {
+                                                    logging::append_log(
+                                                        "WARN",
+                                                        "media.h264_encoder",
+                                                        format!(
+                                                            "no h264 output after {} frames; switching to jpeg fallback",
+                                                            h264_no_output_streak
+                                                        ),
+                                                    );
+                                                    h264_encoder = None;
+                                                    h264_restart_allowed_at_tick =
+                                                        stream_tick.saturating_add(24);
+                                                    h264_no_output_streak = 0;
+                                                }
+                                            } else {
+                                                h264_no_output_streak = 0;
+                                            }
+                                            for packet in packets {
                                                 let packet = encode_media_packet(
                                                     StreamCodec::H264,
                                                     MediaPacketKind::Frame,
@@ -334,6 +362,20 @@ pub fn spawn_stream(
                                                     sent_frame = false;
                                                     break;
                                                 }
+                                                h264_packets_sent =
+                                                    h264_packets_sent.saturating_add(1);
+                                                if h264_packets_sent == 1
+                                                    || h264_packets_sent % 120 == 0
+                                                {
+                                                    logging::append_log(
+                                                        "INFO",
+                                                        "media.h264_encoder",
+                                                        format!(
+                                                            "sent_h264_packets={}",
+                                                            h264_packets_sent
+                                                        ),
+                                                    );
+                                                }
                                                 sent_frame = true;
                                             }
                                         } else {
@@ -343,16 +385,25 @@ pub fn spawn_stream(
                                                 "ffmpeg stdin write failed, falling back to jpeg",
                                             );
                                             h264_encoder = None;
+                                            h264_restart_allowed_at_tick =
+                                                stream_tick.saturating_add(24);
+                                            h264_no_output_streak = 0;
                                         }
                                     }
                                 }
-                                Err(_) => {
+                                Err(error) => {
                                     logging::append_log(
                                         "WARN",
                                         "media.h264_encoder",
-                                        "failed to start encoder, falling back to jpeg",
+                                        format!(
+                                            "failed to start encoder, falling back to jpeg: {}",
+                                            error
+                                        ),
                                     );
                                     h264_encoder = None;
+                                    h264_restart_allowed_at_tick =
+                                        stream_tick.saturating_add(24);
+                                    h264_no_output_streak = 0;
                                 }
                             }
                         }
