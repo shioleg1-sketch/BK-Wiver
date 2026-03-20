@@ -37,10 +37,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "Host\installer\windows\stage" | Out-Null
           New-Item -ItemType Directory -Force -Path "Consol\installer\windows\stage" | Out-Null
-          if (!(Test-Path "target\release\bk-wiver-host.exe")) { throw "target\\release\\bk-wiver-host.exe not found" }
-          if (!(Test-Path "target\release\bk-wiver-console.exe")) { throw "target\\release\\bk-wiver-console.exe not found" }
-          Copy-Item -Force "target\release\bk-wiver-host.exe" "Host\installer\windows\stage\bk-wiver-host.exe"
-          Copy-Item -Force "target\release\bk-wiver-console.exe" "Consol\installer\windows\stage\bk-wiver-console.exe"
+          $hostExe = Get-ChildItem -Path "target" -Filter "bk-wiver-host.exe" -Recurse | Select-Object -First 1
+          $consoleExe = Get-ChildItem -Path "target" -Filter "bk-wiver-console.exe" -Recurse | Select-Object -First 1
+          if (-not $hostExe) { throw "bk-wiver-host.exe not found under target" }
+          if (-not $consoleExe) { throw "bk-wiver-console.exe not found under target" }
+          Copy-Item -Force $hostExe.FullName "Host\installer\windows\stage\bk-wiver-host.exe"
+          Copy-Item -Force $consoleExe.FullName "Consol\installer\windows\stage\bk-wiver-console.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
