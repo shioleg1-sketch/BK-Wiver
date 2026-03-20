@@ -6,6 +6,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
     },
     thread,
     time::Duration,
@@ -55,6 +56,7 @@ struct H264DecoderSession {
     child: Child,
     stdin: ChildStdin,
     flavor: H264DecoderFlavor,
+    exit_rx: Receiver<()>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -133,11 +135,14 @@ fn h264_decoder_candidates() -> Vec<H264DecoderFlavor> {
         candidates.push(H264DecoderFlavor::D3d11va);
         candidates.push(H264DecoderFlavor::Dxva2);
         candidates.push(H264DecoderFlavor::Qsv);
+        candidates.push(H264DecoderFlavor::Software);
     }
     #[cfg(target_os = "macos")]
     {
+        candidates.push(H264DecoderFlavor::Software);
         candidates.push(H264DecoderFlavor::VideoToolbox);
     }
+    #[cfg(not(any(windows, target_os = "macos")))]
     candidates.push(H264DecoderFlavor::Software);
     candidates
 }
@@ -196,6 +201,7 @@ impl H264DecoderSession {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg decoder stdout is not available".to_owned())?;
+        let (exit_tx, exit_rx) = mpsc::channel();
 
         thread::spawn(move || {
             let frame_len = (width as usize)
@@ -229,16 +235,21 @@ impl H264DecoderSession {
                     height: Some(height),
                 });
             }
+            let _ = exit_tx.send(());
         });
 
         Ok(Self {
             child,
             stdin,
             flavor,
+            exit_rx,
         })
     }
 
     fn push_packet(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.exit_rx.try_recv().is_ok() {
+            return Err(format!("decoder {} exited", self.flavor.label()));
+        }
         self.stdin.write_all(bytes).map_err(|error| error.to_string())
     }
 
@@ -471,14 +482,25 @@ fn ensure_h264_decoder(
     session_id: String,
     event_tx: Sender<MediaEvent>,
 ) -> Result<H264DecoderSession, String> {
-    let Some(flavor) = h264_decoder_candidates()
+    let mut last_error = None;
+    for flavor in h264_decoder_candidates()
         .into_iter()
-        .find(|candidate| !disabled_flavors.contains(candidate))
-    else {
-        return Err("no available h264 decoders after fallback attempts".to_owned());
-    };
+        .filter(|candidate| !disabled_flavors.contains(candidate))
+    {
+        match H264DecoderSession::new(width, height, session_id.clone(), event_tx.clone(), flavor) {
+            Ok(session) => return Ok(session),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "media.h264_decoder",
+                    format!("failed to start decoder {}: {}", flavor.label(), error),
+                );
+                last_error = Some(format!("{}: {}", flavor.label(), error));
+            }
+        }
+    }
 
-    H264DecoderSession::new(width, height, session_id, event_tx, flavor)
+    Err(last_error.unwrap_or_else(|| "no available h264 decoders after fallback attempts".to_owned()))
 }
 
 fn configure_hidden_process(_command: &mut Command) {

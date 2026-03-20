@@ -533,7 +533,7 @@ pub fn spawn_stream(
                                             if packets.is_empty() {
                                                 h264_no_output_streak =
                                                     h264_no_output_streak.saturating_add(1);
-                                                if h264_no_output_streak >= 8 {
+                                                if h264_no_output_streak >= 3 {
                                                     logging::append_log(
                                                         "WARN",
                                                         "media.h264_encoder",
@@ -726,34 +726,49 @@ fn ensure_h264_encoder(
         return Ok(());
     }
 
-    let Some(flavor) = h264_encoder_candidates()
+    let mut last_error = None;
+    for flavor in h264_encoder_candidates()
         .into_iter()
-        .find(|candidate| !disabled_flavors.contains(candidate))
-    else {
-        return Err("no available h264 encoders after fallback attempts".to_owned());
-    };
+        .filter(|candidate| !disabled_flavors.contains(candidate))
+    {
+        match H264EncoderSession::new(width, height, profile, flavor) {
+            Ok(session) => {
+                *encoder = Some(session);
+                logging::append_log(
+                    "INFO",
+                    "media.h264_encoder",
+                    format!(
+                        "config sent encoder={} width={} height={}",
+                        flavor.label(),
+                        width,
+                        height
+                    ),
+                );
+                let config = json!({
+                    "width": width,
+                    "height": height,
+                });
+                let payload =
+                    serde_json::to_vec(&config).map_err(|error| error.to_string())?;
+                let packet =
+                    encode_media_packet(StreamCodec::H264, MediaPacketKind::Config, &payload);
+                socket
+                    .send(Message::Binary(packet.into()))
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "media.h264_encoder",
+                    format!("failed to start encoder {}: {}", flavor.label(), error),
+                );
+                last_error = Some(format!("{}: {}", flavor.label(), error));
+            }
+        }
+    }
 
-    *encoder = Some(H264EncoderSession::new(width, height, profile, flavor)?);
-    logging::append_log(
-        "INFO",
-        "media.h264_encoder",
-        format!(
-            "config sent encoder={} width={} height={}",
-            flavor.label(),
-            width,
-            height
-        ),
-    );
-    let config = json!({
-        "width": width,
-        "height": height,
-    });
-    let payload = serde_json::to_vec(&config).map_err(|error| error.to_string())?;
-    let packet = encode_media_packet(StreamCodec::H264, MediaPacketKind::Config, &payload);
-    socket
-        .send(Message::Binary(packet.into()))
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    Err(last_error.unwrap_or_else(|| "no available h264 encoders after fallback attempts".to_owned()))
 }
 
 fn configure_hidden_process(_command: &mut Command) {
