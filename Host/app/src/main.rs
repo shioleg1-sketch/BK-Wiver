@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod capture;
 mod logging;
 mod media;
 mod signal;

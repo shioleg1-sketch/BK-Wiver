@@ -12,22 +12,16 @@ use std::{
     time::Duration,
 };
 
-use image::{
-    ColorType, ImageBuffer, ImageEncoder, Rgba, RgbaImage, codecs::jpeg::JpegEncoder,
-    imageops::FilterType,
-};
-use screenshots::Screen;
+use image::{ColorType, ImageEncoder, RgbaImage, codecs::jpeg::JpegEncoder};
 use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
-use crate::logging;
+use crate::{capture::CaptureEngine, logging};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const TEST_FRAME_WIDTH: u32 = 960;
-const TEST_FRAME_HEIGHT: u32 = 540;
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
 #[cfg(windows)]
@@ -274,7 +268,7 @@ pub fn spawn_stream(
 
         let mut frame_index = 0_u32;
         let mut stream_tick = 0_u64;
-        let mut active_screen = select_capture_screen();
+        let mut capture_engine = CaptureEngine::new();
         let mut previous_signature: Option<Vec<u8>> = None;
         let mut h264_no_output_streak: u32;
         let mut h264_packets_sent = 0_u64;
@@ -293,20 +287,17 @@ pub fn spawn_stream(
                             .map(|guard| *guard)
                             .unwrap_or(StreamCodec::Auto);
 
-                        let frame_image = match active_screen.as_ref() {
-                            Some(screen) => match capture_screen_image(screen, stream_profile) {
-                                Ok(frame) => frame,
-                                Err(_) => {
-                                    active_screen = select_capture_screen();
-                                    build_test_frame(frame_index)
-                                }
-                            },
-                            None => {
-                                active_screen = select_capture_screen();
-                                build_test_frame(frame_index)
-                            }
-                        };
+                        let captured = capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                        let frame_image = captured.image;
                         frame_index = frame_index.wrapping_add(1);
+
+                        if captured.used_fallback && frame_index % 60 == 1 {
+                            logging::append_log(
+                                "WARN",
+                                "capture",
+                                format!("fallback frame active backend={}", captured.backend),
+                            );
+                        }
 
                         let signature = frame_signature(frame_image.as_raw());
                         let is_active = previous_signature
@@ -435,65 +426,6 @@ pub fn spawn_stream(
             }
         }
     });
-}
-
-fn select_capture_screen() -> Option<Screen> {
-    let screens = Screen::all().ok()?;
-    screens
-        .iter()
-        .find(|screen| screen.display_info.is_primary)
-        .copied()
-        .or_else(|| screens.into_iter().next())
-}
-
-fn capture_screen_image(screen: &Screen, profile: StreamProfile) -> Result<RgbaImage, String> {
-    let captured = screen.capture().map_err(|error| error.to_string())?;
-    let width = captured.width();
-    let height = captured.height();
-    let raw = captured.into_raw();
-
-    let image = ImageBuffer::from_raw(width, height, raw)
-        .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
-
-    Ok(fit_frame(image, profile.max_dimensions()))
-}
-
-fn fit_frame(image: RgbaImage, max_dimensions: (u32, u32)) -> RgbaImage {
-    let width = image.width();
-    let height = image.height();
-    if width <= max_dimensions.0 && height <= max_dimensions.1 {
-        return image;
-    }
-
-    let scale = (max_dimensions.0 as f32 / width as f32)
-        .min(max_dimensions.1 as f32 / height as f32);
-    let resized_width = ((width as f32 * scale).round() as u32).max(1);
-    let resized_height = ((height as f32 * scale).round() as u32).max(1);
-    image::imageops::resize(&image, resized_width, resized_height, FilterType::Triangle)
-}
-
-fn build_test_frame(frame_index: u32) -> RgbaImage {
-    let mut image: RgbaImage = ImageBuffer::new(TEST_FRAME_WIDTH, TEST_FRAME_HEIGHT);
-    let shift = (frame_index * 13) % TEST_FRAME_WIDTH;
-    let pulse = ((frame_index * 17) % 255) as u8;
-
-    for (x, y, pixel) in image.enumerate_pixels_mut() {
-        let r = (((x + shift) % TEST_FRAME_WIDTH) * 255 / TEST_FRAME_WIDTH) as u8;
-        let g = ((y * 255) / TEST_FRAME_HEIGHT) as u8;
-        let mut b = pulse;
-
-        if x > shift.saturating_sub(28) && x < (shift + 28).min(TEST_FRAME_WIDTH) {
-            b = 240;
-        }
-
-        let border = x < 6 || y < 6 || x > TEST_FRAME_WIDTH - 7 || y > TEST_FRAME_HEIGHT - 7;
-        *pixel = if border {
-            Rgba([220, 226, 233, 255])
-        } else {
-            Rgba([r, g, b, 255])
-        };
-    }
-    image
 }
 
 fn encode_jpeg(image: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
