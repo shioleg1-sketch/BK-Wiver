@@ -35,12 +35,24 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "Host\installer\windows\stage" | Out-Null
           New-Item -ItemType Directory -Force -Path "Consol\installer\windows\stage" | Out-Null
-          $hostExe = Get-ChildItem -Path "target" -Filter "bk-wiver-host.exe" -Recurse | Select-Object -First 1
-          $consoleExe = Get-ChildItem -Path "target" -Filter "bk-wiver-console.exe" -Recurse | Select-Object -First 1
-          if (-not $hostExe) { throw "bk-wiver-host.exe not found under target" }
-          if (-not $consoleExe) { throw "bk-wiver-console.exe not found under target" }
-          Copy-Item -Force $hostExe.FullName "Host\installer\windows\stage\bk-wiver-host.exe"
-          Copy-Item -Force $consoleExe.FullName "Consol\installer\windows\stage\bk-wiver-console.exe"
+          $hostExe = Join-Path $PWD "target\release\bk-wiver-host.exe"
+          $consoleExe = Join-Path $PWD "target\release\bk-wiver-console.exe"
+          if (-not (Test-Path $hostExe)) {
+            Write-Host "Expected host binary not found at $hostExe"
+            if (Test-Path "target\release") {
+              Get-ChildItem -Path "target\release" | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+            }
+            throw "bk-wiver-host.exe not found at target\\release"
+          }
+          if (-not (Test-Path $consoleExe)) {
+            Write-Host "Expected console binary not found at $consoleExe"
+            if (Test-Path "target\release") {
+              Get-ChildItem -Path "target\release" | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+            }
+            throw "bk-wiver-console.exe not found at target\\release"
+          }
+          Copy-Item -Force $hostExe "Host\installer\windows\stage\bk-wiver-host.exe"
+          Copy-Item -Force $consoleExe "Consol\installer\windows\stage\bk-wiver-console.exe"
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y

@@ -24,6 +24,7 @@ use std::os::windows::process::CommandExt;
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
+const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -470,6 +471,7 @@ pub fn spawn_stream(
         let mut h264_no_output_streak: u32;
         let mut h264_packets_sent = 0_u64;
         let mut h264_restart_allowed_at_tick = 0_u64;
+        let mut last_sent_tick = 0_u64;
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
@@ -503,6 +505,13 @@ pub fn spawn_stream(
                             .map(|previous| signature_distance(previous, &signature) > 4)
                             .unwrap_or(true);
                         previous_signature = Some(signature);
+                        let should_refresh_idle =
+                            stream_tick.saturating_sub(last_sent_tick) >= IDLE_REFRESH_INTERVAL_TICKS;
+
+                        if !is_active && !should_refresh_idle {
+                            thread::sleep(stream_profile.idle_frame_delay());
+                            continue;
+                        }
 
                         let mut sent_frame = false;
                         let should_try_h264 =
@@ -615,6 +624,11 @@ pub fn spawn_stream(
                             if socket.send(Message::Binary(packet.into())).is_err() {
                                 break;
                             }
+                            sent_frame = true;
+                        }
+
+                        if sent_frame {
+                            last_sent_tick = stream_tick;
                         }
 
                         thread::sleep(if is_active {
