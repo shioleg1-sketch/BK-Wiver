@@ -106,7 +106,7 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
     };
 
     Url::parse(&format!(
-        "{ws_base}/ws/v1/media?token={token}&session_id={session_id}"
+        "{ws_base}/ws/v1/media?token={token}&sessionId={session_id}"
     ))
     .map_err(|error| error.to_string())
 }
