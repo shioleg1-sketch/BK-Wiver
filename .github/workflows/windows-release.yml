@@ -45,6 +45,4 @@ jobs:
           files: |
             dist/BK-Host-Setup.exe
             dist/BK-Console-Setup.exe
-            target/release/bk-wiver-host.exe
-            target/release/bk-wiver-console.exe
           generate_release_notes: true
