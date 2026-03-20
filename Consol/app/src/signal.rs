@@ -93,6 +93,33 @@ pub fn send_mouse_click(
     )
 }
 
+pub fn send_mouse_event(
+    server_url: &str,
+    token: &str,
+    session_id: &str,
+    action: &str,
+    button: &str,
+    x_norm: f32,
+    y_norm: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.input_mouse",
+            "sessionId": session_id,
+            "action": action,
+            "button": button,
+            "xNorm": x_norm,
+            "yNorm": y_norm,
+            "scrollX": scroll_x,
+            "scrollY": scroll_y,
+        }),
+    )
+}
+
 pub fn send_key_text(
     server_url: &str,
     token: &str,

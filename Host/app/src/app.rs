@@ -1,5 +1,5 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use eframe::{
     App, NativeOptions,
     egui::{self, Align, Color32, Layout, RichText, Stroke, ViewportCommand},
@@ -529,8 +529,17 @@ impl HostApp {
                     button,
                     x_norm,
                     y_norm,
+                    scroll_x,
+                    scroll_y,
                 } => {
-                    match self.apply_mouse_input(x_norm, y_norm, &button, &action) {
+                    match self.apply_mouse_input(
+                        x_norm,
+                        y_norm,
+                        &button,
+                        &action,
+                        scroll_x,
+                        scroll_y,
+                    ) {
                         Ok(()) => {
                             self.status_line = format!(
                                 "Выполнена команда мыши для сеанса {session_id}."
@@ -569,6 +578,8 @@ impl HostApp {
         y_norm: f32,
         button: &str,
         action: &str,
+        scroll_x: f32,
+        scroll_y: f32,
     ) -> Result<(), String> {
         let screen = select_primary_screen().ok_or_else(|| "экран не найден".to_owned())?;
         let info = screen.display_info;
@@ -581,6 +592,26 @@ impl HostApp {
         enigo
             .move_mouse(x, y, Coordinate::Abs)
             .map_err(|error| error.to_string())?;
+
+        if action == "move" {
+            return Ok(());
+        }
+
+        if action == "scroll" {
+            let horizontal = scroll_x.round() as i32;
+            let vertical = scroll_y.round() as i32;
+            if horizontal != 0 {
+                enigo
+                    .scroll(horizontal, Axis::Horizontal)
+                    .map_err(|error| error.to_string())?;
+            }
+            if vertical != 0 {
+                enigo
+                    .scroll(vertical, Axis::Vertical)
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
 
         let button = match button {
             "right" => Button::Right,

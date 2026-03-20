@@ -22,6 +22,8 @@ pub enum SignalEvent {
         button: String,
         x_norm: f32,
         y_norm: f32,
+        scroll_x: f32,
+        scroll_y: f32,
     },
     KeyInput {
         session_id: String,
@@ -130,6 +132,14 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
                 .to_owned(),
             x_norm: payload.get("xNorm").and_then(Value::as_f64).unwrap_or(0.5) as f32,
             y_norm: payload.get("yNorm").and_then(Value::as_f64).unwrap_or(0.5) as f32,
+            scroll_x: payload
+                .get("scrollX")
+                .and_then(Value::as_f64)
+                .unwrap_or_default() as f32,
+            scroll_y: payload
+                .get("scrollY")
+                .and_then(Value::as_f64)
+                .unwrap_or_default() as f32,
         }),
         "session.input_key" => Some(SignalEvent::KeyInput {
             session_id: payload.get("sessionId")?.as_str()?.to_owned(),
