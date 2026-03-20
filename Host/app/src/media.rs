@@ -323,7 +323,7 @@ impl H264EncoderFlavor {
 }
 
 fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
-    let mut candidates = Vec::new();
+    let mut candidates = vec![H264EncoderFlavor::Libx264];
     #[cfg(windows)]
     {
         candidates.push(H264EncoderFlavor::Nvenc);
@@ -334,7 +334,6 @@ fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
     {
         candidates.push(H264EncoderFlavor::VideoToolbox);
     }
-    candidates.push(H264EncoderFlavor::Libx264);
     candidates
 }
 
