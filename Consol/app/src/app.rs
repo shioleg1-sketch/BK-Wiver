@@ -1035,40 +1035,95 @@ impl ConsoleApp {
 
         let server_url = normalize_server_url(&self.server_url);
 
-        if response.clicked() {
-            self.remote_input_captured = true;
-            response.request_focus();
-
-            if let Some(pointer_pos) = response.interact_pointer_pos() {
-                let x_norm =
-                    ((pointer_pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
-                let y_norm =
-                    ((pointer_pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
-
-                if let Err(error) = signal::send_mouse_click(
-                    &server_url,
-                    &token,
-                    &session.session_id,
-                    x_norm,
-                    y_norm,
-                    "left",
-                ) {
-                    self.status_line = format!("Не удалось отправить клик: {error}");
-                } else {
-                    self.status_line = "Клик отправлен на Host. Ввод закреплён за окном сеанса."
-                        .to_owned();
-                }
-            }
-        }
-
-        if !self.remote_input_captured {
-            return;
-        }
-
         let events = ctx.input(|input| input.events.clone());
         for event in events {
             match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    ..
+                } if image_rect.contains(pos) => {
+                    self.remote_input_captured = true;
+                    response.request_focus();
+
+                    let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+                    let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+                    let button_name = match button {
+                        egui::PointerButton::Primary => "left",
+                        egui::PointerButton::Secondary => "right",
+                        egui::PointerButton::Middle => "middle",
+                        _ => "left",
+                    };
+                    let action = if pressed { "press" } else { "release" };
+                    if let Err(error) = signal::send_mouse_event(
+                        &server_url,
+                        &token,
+                        &session.session_id,
+                        action,
+                        button_name,
+                        x_norm,
+                        y_norm,
+                        0.0,
+                        0.0,
+                    ) {
+                        self.status_line = format!("Не удалось отправить мышь: {error}");
+                    }
+                }
+                egui::Event::PointerMoved(pos)
+                    if self.remote_input_captured && image_rect.contains(pos) =>
+                {
+                    let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+                    let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+                    if let Err(error) = signal::send_mouse_event(
+                        &server_url,
+                        &token,
+                        &session.session_id,
+                        "move",
+                        "left",
+                        x_norm,
+                        y_norm,
+                        0.0,
+                        0.0,
+                    ) {
+                        self.status_line = format!("Не удалось отправить движение мыши: {error}");
+                    }
+                }
+                egui::Event::MouseWheel { delta, .. } if self.remote_input_captured => {
+                    let pointer_pos = ctx.input(|input| input.pointer.hover_pos());
+                    let Some(pointer_pos) = pointer_pos else {
+                        continue;
+                    };
+                    if !image_rect.contains(pointer_pos) {
+                        continue;
+                    }
+
+                    let x_norm = ((pointer_pos.x - image_rect.left()) / image_rect.width())
+                        .clamp(0.0, 1.0);
+                    let y_norm =
+                        ((pointer_pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+                    let scroll_x = (delta.x / 24.0).clamp(-6.0, 6.0);
+                    let scroll_y = (-delta.y / 24.0).clamp(-6.0, 6.0);
+                    if scroll_x != 0.0 || scroll_y != 0.0 {
+                        if let Err(error) = signal::send_mouse_event(
+                            &server_url,
+                            &token,
+                            &session.session_id,
+                            "scroll",
+                            "left",
+                            x_norm,
+                            y_norm,
+                            scroll_x,
+                            scroll_y,
+                        ) {
+                            self.status_line = format!("Не удалось отправить прокрутку: {error}");
+                        }
+                    }
+                }
                 egui::Event::Text(text) => {
+                    if !self.remote_input_captured {
+                        continue;
+                    }
                     if text.chars().any(|character| !character.is_control())
                         && let Err(error) = signal::send_key_text(
                             &server_url,
@@ -1086,6 +1141,9 @@ impl ConsoleApp {
                     repeat: false,
                     ..
                 } => {
+                    if !self.remote_input_captured {
+                        continue;
+                    }
                     if let Some(named_key) = map_egui_key(key)
                         && let Err(error) = signal::send_key_named(
                             &server_url,
@@ -1116,103 +1174,73 @@ impl ConsoleApp {
         egui::Window::new("Окно сеанса")
             .id(egui::Id::new("session_window"))
             .open(&mut open)
-            .default_size(Vec2::new(980.0, 640.0))
-            .min_size(Vec2::new(760.0, 520.0))
+            .default_size(Vec2::new(1280.0, 820.0))
+            .min_size(Vec2::new(920.0, 640.0))
             .resizable(true)
             .show(ctx, |ui| {
-                ui.columns(2, |columns| {
-                    columns[0].vertical(|ui| {
-                        let (response, image_rect) = self.remote_view_placeholder(ui, &session);
-                        self.handle_remote_input(ctx, &session, &response, image_rect);
+                Frame::new()
+                    .fill(Color32::from_rgb(245, 247, 249))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(210, 216, 222)))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.heading(
+                                RichText::new(&session.target_host_name)
+                                    .strong()
+                                    .color(Color32::from_rgb(37, 54, 74)),
+                            );
+                            ui.add_space(8.0);
+                            let (status_tint, status_fill) =
+                                Self::session_status_colors(&session.state);
+                            status_chip(
+                                ui,
+                                Self::session_status_label(&session.state),
+                                status_tint,
+                                status_fill,
+                            );
+                            ui.separator();
+                            ui.label(format!("Сеанс {}", session.session_id));
+                            ui.separator();
+                            ui.label(format!("Истекает {}", format_ms(session.expires_at_ms)));
+                            ui.separator();
+                            ui.label(if self.media_connected_session_id.as_deref()
+                                == Some(session.session_id.as_str())
+                            {
+                                "media подключён"
+                            } else {
+                                "media ожидает кадры"
+                            });
+                            ui.separator();
+                            ui.label(if self.remote_input_captured {
+                                "ввод закреплён за сеансом"
+                            } else {
+                                "кликните по экрану для захвата ввода"
+                            });
+                        });
                     });
 
-                    columns[1].vertical(|ui| {
-                        ui.heading(
-                            RichText::new(&session.target_host_name)
-                                .strong()
-                                .color(Color32::from_rgb(37, 54, 74)),
-                        );
-                        ui.label(
-                            RichText::new(format!("ID хоста: {}", session.target_host_id))
-                                .color(Color32::from_rgb(92, 103, 114)),
-                        );
-                        ui.add_space(8.0);
+                ui.add_space(8.0);
+                let (response, image_rect) = self.remote_view_placeholder(ui, &session);
+                self.handle_remote_input(ctx, &session, &response, image_rect);
 
-                        let (status_tint, status_fill) =
-                            Self::session_status_colors(&session.state);
-                        status_chip(
-                            ui,
-                            Self::session_status_label(&session.state),
-                            status_tint,
-                            status_fill,
-                        );
-
-                        ui.add_space(10.0);
-                        Frame::new()
-                            .fill(Color32::from_rgb(243, 246, 249))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(199, 206, 213)))
-                            .corner_radius(CornerRadius::same(6))
-                            .inner_margin(egui::Margin::same(10))
-                            .show(ui, |ui| {
-                                Grid::new("session_window_grid")
-                                    .num_columns(2)
-                                    .spacing([12.0, 8.0])
-                                    .show(ui, |ui| {
-                                        detail_row(ui, "Сеанс", &session.session_id);
-                                        detail_row(
-                                            ui,
-                                            "Истекает",
-                                            &format_ms(session.expires_at_ms),
-                                        );
-                                        detail_row(
-                                            ui,
-                                            "Канал",
-                                            if self.signal_listener_key.is_some() {
-                                                "signal подключён"
-                                            } else {
-                                                "signal переподключается"
-                                            },
-                                        );
-                                        detail_row(
-                                            ui,
-                                            "Режим",
-                                            if session.state == "demo" {
-                                                "демонстрационный"
-                                            } else {
-                                                "удалённый сеанс"
-                                            },
-                                        );
-                                        detail_row(
-                                            ui,
-                                            "Медиа",
-                                            if self.media_connected_session_id.as_deref()
-                                                == Some(session.session_id.as_str())
-                                            {
-                                                "media подключён"
-                                            } else {
-                                                "ожидаем кадры"
-                                            },
-                                        );
-                                    });
-                            });
-
-                        ui.add_space(12.0);
-                        subpanel(ui, "Этап сеанса", |ui| {
-                            ui.label(
-                                RichText::new(Self::session_stage_note(&session.state))
-                                    .color(Color32::from_rgb(79, 90, 101)),
-                            );
-                        });
-
-                        ui.add_space(10.0);
-                        subpanel(ui, "Следующие шаги", |ui| {
-                            ui.label("1. Клик по удалённому экрану уже отправляет мышь на Host.");
-                            ui.label("2. После клика в это окно идут текст, Enter, Backspace, Esc и стрелки.");
-                            ui.label("3. Следующим шагом можно добавить drag, правую кнопку и wheel.");
-                        });
-
-                        ui.add_space(14.0);
+                ui.add_space(8.0);
+                Frame::new()
+                    .fill(Color32::from_rgb(245, 247, 249))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(210, 216, 222)))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}. ID хоста: {}.",
+                                    Self::session_stage_note(&session.state),
+                                    session.target_host_id
+                                ))
+                                .color(Color32::from_rgb(79, 90, 101)),
+                            );
+                            ui.add_space(10.0);
                             let close_enabled =
                                 !matches!(session.state.as_str(), "closed" | "rejected");
                             if ui
@@ -1227,7 +1255,6 @@ impl ConsoleApp {
                             }
                         });
                     });
-                });
             });
 
         self.show_session_window = open;
