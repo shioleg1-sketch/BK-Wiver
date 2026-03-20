@@ -1,5 +1,7 @@
 use std::{
+    env,
     io::{Read, Write},
+    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc,
@@ -55,7 +57,7 @@ struct H264Config {
 
 impl H264DecoderSession {
     fn new(width: u32, height: u32, session_id: String, event_tx: Sender<MediaEvent>) -> Result<Self, String> {
-        let mut child = Command::new("ffmpeg")
+        let mut child = Command::new(ffmpeg_executable_path())
             .arg("-loglevel")
             .arg("error")
             .arg("-fflags")
@@ -247,4 +249,29 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     };
 
     Some((codec, kind, bytes[MEDIA_PACKET_HEADER_LEN..].to_vec()))
+}
+
+fn ffmpeg_executable_path() -> PathBuf {
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let bundled = parent.join("ffmpeg");
+        if bundled.exists() {
+            return bundled;
+        }
+        let bundled_exe = parent.join("ffmpeg.exe");
+        if bundled_exe.exists() {
+            return bundled_exe;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    PathBuf::from("ffmpeg")
 }
