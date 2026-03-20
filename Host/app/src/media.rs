@@ -129,6 +129,30 @@ impl StreamProfile {
             Self::Sharp => 22,
         }
     }
+
+    fn target_crf(self) -> &'static str {
+        match self {
+            Self::Fast => "29",
+            Self::Balanced => "26",
+            Self::Sharp => "23",
+        }
+    }
+
+    fn target_maxrate(self) -> &'static str {
+        match self {
+            Self::Fast => "1800k",
+            Self::Balanced => "3000k",
+            Self::Sharp => "4500k",
+        }
+    }
+
+    fn target_bufsize(self) -> &'static str {
+        match self {
+            Self::Fast => "900k",
+            Self::Balanced => "1500k",
+            Self::Sharp => "2200k",
+        }
+    }
 }
 
 struct H264EncoderSession {
@@ -137,17 +161,197 @@ struct H264EncoderSession {
     packet_rx: Receiver<Vec<u8>>,
     width: u32,
     height: u32,
+    flavor: H264EncoderFlavor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H264EncoderFlavor {
+    #[cfg(windows)]
+    Nvenc,
+    #[cfg(windows)]
+    Qsv,
+    #[cfg(windows)]
+    Amf,
+    #[cfg(target_os = "macos")]
+    VideoToolbox,
+    Libx264,
+}
+
+impl H264EncoderFlavor {
+    fn label(self) -> &'static str {
+        match self {
+            #[cfg(windows)]
+            Self::Nvenc => "h264_nvenc",
+            #[cfg(windows)]
+            Self::Qsv => "h264_qsv",
+            #[cfg(windows)]
+            Self::Amf => "h264_amf",
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => "h264_videotoolbox",
+            Self::Libx264 => "libx264",
+        }
+    }
+
+    fn append_ffmpeg_args(self, command: &mut Command, profile: StreamProfile) {
+        match self {
+            #[cfg(windows)]
+            Self::Nvenc => {
+                command
+                    .arg("-c:v")
+                    .arg("h264_nvenc")
+                    .arg("-preset")
+                    .arg("p1")
+                    .arg("-tune")
+                    .arg("ll")
+                    .arg("-rc:v")
+                    .arg("vbr")
+                    .arg("-cq:v")
+                    .arg(profile.target_crf())
+                    .arg("-b:v")
+                    .arg("0")
+                    .arg("-maxrate")
+                    .arg(profile.target_maxrate())
+                    .arg("-bufsize")
+                    .arg(profile.target_bufsize())
+                    .arg("-profile:v")
+                    .arg("baseline")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p")
+                    .arg("-g")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-bf")
+                    .arg("0");
+            }
+            #[cfg(windows)]
+            Self::Qsv => {
+                command
+                    .arg("-c:v")
+                    .arg("h264_qsv")
+                    .arg("-preset")
+                    .arg("veryfast")
+                    .arg("-look_ahead")
+                    .arg("0")
+                    .arg("-maxrate")
+                    .arg(profile.target_maxrate())
+                    .arg("-bufsize")
+                    .arg(profile.target_bufsize())
+                    .arg("-profile:v")
+                    .arg("baseline")
+                    .arg("-pix_fmt")
+                    .arg("nv12")
+                    .arg("-g")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-bf")
+                    .arg("0");
+            }
+            #[cfg(windows)]
+            Self::Amf => {
+                command
+                    .arg("-c:v")
+                    .arg("h264_amf")
+                    .arg("-usage")
+                    .arg("ultralowlatency")
+                    .arg("-quality")
+                    .arg("speed")
+                    .arg("-maxrate")
+                    .arg(profile.target_maxrate())
+                    .arg("-bufsize")
+                    .arg(profile.target_bufsize())
+                    .arg("-profile:v")
+                    .arg("baseline")
+                    .arg("-pix_fmt")
+                    .arg("nv12")
+                    .arg("-g")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-bf")
+                    .arg("0");
+            }
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => {
+                command
+                    .arg("-c:v")
+                    .arg("h264_videotoolbox")
+                    .arg("-realtime")
+                    .arg("1")
+                    .arg("-allow_sw")
+                    .arg("1")
+                    .arg("-maxrate")
+                    .arg(profile.target_maxrate())
+                    .arg("-bufsize")
+                    .arg(profile.target_bufsize())
+                    .arg("-profile:v")
+                    .arg("baseline")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p")
+                    .arg("-g")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-bf")
+                    .arg("0");
+            }
+            Self::Libx264 => {
+                command
+                    .arg("-c:v")
+                    .arg("libx264")
+                    .arg("-preset")
+                    .arg("ultrafast")
+                    .arg("-tune")
+                    .arg("zerolatency")
+                    .arg("-profile:v")
+                    .arg("baseline")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p")
+                    .arg("-bf")
+                    .arg("0")
+                    .arg("-refs")
+                    .arg("1")
+                    .arg("-crf")
+                    .arg(profile.target_crf())
+                    .arg("-maxrate")
+                    .arg(profile.target_maxrate())
+                    .arg("-bufsize")
+                    .arg(profile.target_bufsize())
+                    .arg("-g")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-keyint_min")
+                    .arg(profile.target_fps().to_string())
+                    .arg("-x264-params")
+                    .arg("scenecut=0:repeat-headers=1:bframes=0:sync-lookahead=0:rc-lookahead=0:sliced-threads=1");
+            }
+        }
+    }
+}
+
+fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        candidates.push(H264EncoderFlavor::Nvenc);
+        candidates.push(H264EncoderFlavor::Qsv);
+        candidates.push(H264EncoderFlavor::Amf);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(H264EncoderFlavor::VideoToolbox);
+    }
+    candidates.push(H264EncoderFlavor::Libx264);
+    candidates
 }
 
 impl H264EncoderSession {
-    fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
+    fn new(
+        width: u32,
+        height: u32,
+        profile: StreamProfile,
+        flavor: H264EncoderFlavor,
+    ) -> Result<Self, String> {
         let ffmpeg = ffmpeg_executable_path();
         logging::append_log(
             "INFO",
             "media.h264_encoder",
             format!(
-                "starting ffmpeg={} width={} height={} fps={}",
+                "starting ffmpeg={} encoder={} width={} height={} fps={}",
                 ffmpeg.display(),
+                flavor.label(),
                 width,
                 height,
                 profile.target_fps()
@@ -167,45 +371,9 @@ impl H264EncoderSession {
             .arg(profile.target_fps().to_string())
             .arg("-i")
             .arg("pipe:0")
-            .arg("-an")
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg("ultrafast")
-            .arg("-tune")
-            .arg("zerolatency")
-            .arg("-profile:v")
-            .arg("baseline")
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-bf")
-            .arg("0")
-            .arg("-refs")
-            .arg("1")
-            .arg("-crf")
-            .arg(match profile {
-                StreamProfile::Fast => "29",
-                StreamProfile::Balanced => "26",
-                StreamProfile::Sharp => "23",
-            })
-            .arg("-maxrate")
-            .arg(match profile {
-                StreamProfile::Fast => "1800k",
-                StreamProfile::Balanced => "3000k",
-                StreamProfile::Sharp => "4500k",
-            })
-            .arg("-bufsize")
-            .arg(match profile {
-                StreamProfile::Fast => "900k",
-                StreamProfile::Balanced => "1500k",
-                StreamProfile::Sharp => "2200k",
-            })
-            .arg("-g")
-            .arg(profile.target_fps().to_string())
-            .arg("-keyint_min")
-            .arg(profile.target_fps().to_string())
-            .arg("-x264-params")
-            .arg("scenecut=0:repeat-headers=1:bframes=0:sync-lookahead=0:rc-lookahead=0:sliced-threads=1")
+            .arg("-an");
+        flavor.append_ffmpeg_args(&mut command, profile);
+        command
             .arg("-f")
             .arg("h264")
             .arg("pipe:1")
@@ -247,6 +415,7 @@ impl H264EncoderSession {
             packet_rx,
             width,
             height,
+            flavor,
         })
     }
 
@@ -266,6 +435,10 @@ impl H264EncoderSession {
 
     fn matches(&self, width: u32, height: u32) -> bool {
         self.width == width && self.height == height
+    }
+
+    fn flavor(&self) -> H264EncoderFlavor {
+        self.flavor
     }
 }
 
@@ -301,6 +474,7 @@ pub fn spawn_stream(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_encoder: Option<H264EncoderSession> = None;
+                    let mut h264_disabled_flavors: Vec<H264EncoderFlavor> = Vec::new();
                     h264_no_output_streak = 0;
                     while !stop_flag.load(Ordering::Relaxed) {
                         stream_tick = stream_tick.saturating_add(1);
@@ -337,6 +511,7 @@ pub fn spawn_stream(
                         if should_try_h264 {
                             match ensure_h264_encoder(
                                 &mut h264_encoder,
+                                &h264_disabled_flavors,
                                 &mut socket,
                                 frame_image.width(),
                                 frame_image.height(),
@@ -354,10 +529,13 @@ pub fn spawn_stream(
                                                         "WARN",
                                                         "media.h264_encoder",
                                                         format!(
-                                                            "no h264 output after {} frames; switching to jpeg fallback",
-                                                            h264_no_output_streak
+                                                            "no h264 output after {} frames on {}; switching to jpeg fallback",
+                                                            h264_no_output_streak,
+                                                            encoder.flavor().label()
                                                         ),
                                                     );
+                                                    h264_disabled_flavors
+                                                        .push(encoder.flavor());
                                                     h264_encoder = None;
                                                     h264_restart_allowed_at_tick =
                                                         stream_tick.saturating_add(24);
@@ -397,8 +575,12 @@ pub fn spawn_stream(
                                             logging::append_log(
                                                 "WARN",
                                                 "media.h264_encoder",
-                                                "ffmpeg stdin write failed, falling back to jpeg",
+                                                format!(
+                                                    "ffmpeg stdin write failed on {}, falling back to jpeg",
+                                                    encoder.flavor().label()
+                                                ),
                                             );
+                                            h264_disabled_flavors.push(encoder.flavor());
                                             h264_encoder = None;
                                             h264_restart_allowed_at_tick =
                                                 stream_tick.saturating_add(24);
@@ -515,6 +697,7 @@ pub fn ffmpeg_executable_path() -> PathBuf {
 
 fn ensure_h264_encoder(
     encoder: &mut Option<H264EncoderSession>,
+    disabled_flavors: &[H264EncoderFlavor],
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     width: u32,
     height: u32,
@@ -529,11 +712,23 @@ fn ensure_h264_encoder(
         return Ok(());
     }
 
-    *encoder = Some(H264EncoderSession::new(width, height, profile)?);
+    let Some(flavor) = h264_encoder_candidates()
+        .into_iter()
+        .find(|candidate| !disabled_flavors.contains(candidate))
+    else {
+        return Err("no available h264 encoders after fallback attempts".to_owned());
+    };
+
+    *encoder = Some(H264EncoderSession::new(width, height, profile, flavor)?);
     logging::append_log(
         "INFO",
         "media.h264_encoder",
-        format!("config sent width={} height={}", width, height),
+        format!(
+            "config sent encoder={} width={} height={}",
+            flavor.label(),
+            width,
+            height
+        ),
     );
     let config = json!({
         "width": width,

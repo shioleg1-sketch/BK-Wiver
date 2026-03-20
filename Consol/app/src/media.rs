@@ -18,8 +18,13 @@ use url::Url;
 
 use crate::logging;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
@@ -49,35 +54,125 @@ enum MediaPacketKind {
 struct H264DecoderSession {
     child: Child,
     stdin: ChildStdin,
+    flavor: H264DecoderFlavor,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 struct H264Config {
     width: u32,
     height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H264DecoderFlavor {
+    #[cfg(windows)]
+    D3d11va,
+    #[cfg(windows)]
+    Dxva2,
+    #[cfg(windows)]
+    Qsv,
+    #[cfg(target_os = "macos")]
+    VideoToolbox,
+    Software,
+}
+
+impl H264DecoderFlavor {
+    fn label(self) -> &'static str {
+        match self {
+            #[cfg(windows)]
+            Self::D3d11va => "d3d11va",
+            #[cfg(windows)]
+            Self::Dxva2 => "dxva2",
+            #[cfg(windows)]
+            Self::Qsv => "qsv",
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => "videotoolbox",
+            Self::Software => "software",
+        }
+    }
+
+    fn append_ffmpeg_args(self, command: &mut Command) {
+        match self {
+            #[cfg(windows)]
+            Self::D3d11va => {
+                command
+                    .arg("-hwaccel")
+                    .arg("d3d11va")
+                    .arg("-hwaccel_output_format")
+                    .arg("d3d11");
+            }
+            #[cfg(windows)]
+            Self::Dxva2 => {
+                command
+                    .arg("-hwaccel")
+                    .arg("dxva2")
+                    .arg("-hwaccel_output_format")
+                    .arg("dxva2_vld");
+            }
+            #[cfg(windows)]
+            Self::Qsv => {
+                command
+                    .arg("-hwaccel")
+                    .arg("qsv")
+                    .arg("-c:v")
+                    .arg("h264_qsv");
+            }
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => {
+                command.arg("-hwaccel").arg("videotoolbox");
+            }
+            Self::Software => {}
+        }
+    }
+}
+
+fn h264_decoder_candidates() -> Vec<H264DecoderFlavor> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        candidates.push(H264DecoderFlavor::D3d11va);
+        candidates.push(H264DecoderFlavor::Dxva2);
+        candidates.push(H264DecoderFlavor::Qsv);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(H264DecoderFlavor::VideoToolbox);
+    }
+    candidates.push(H264DecoderFlavor::Software);
+    candidates
+}
+
 impl H264DecoderSession {
-    fn new(width: u32, height: u32, session_id: String, event_tx: Sender<MediaEvent>) -> Result<Self, String> {
+    fn new(
+        width: u32,
+        height: u32,
+        session_id: String,
+        event_tx: Sender<MediaEvent>,
+        flavor: H264DecoderFlavor,
+    ) -> Result<Self, String> {
         let ffmpeg = ffmpeg_executable_path();
         logging::append_log(
             "INFO",
             "media.h264_decoder",
             format!(
-                "starting ffmpeg={} width={} height={} session_id={}",
+                "starting ffmpeg={} decoder={} width={} height={} session_id={}",
                 ffmpeg.display(),
+                flavor.label(),
                 width,
                 height,
                 session_id
             ),
         );
-        let mut child = Command::new(ffmpeg)
+        let mut command = Command::new(ffmpeg);
+        command
             .arg("-loglevel")
             .arg("error")
             .arg("-fflags")
             .arg("nobuffer")
             .arg("-flags")
-            .arg("low_delay")
+            .arg("low_delay");
+        flavor.append_ffmpeg_args(&mut command);
+        command
             .arg("-f")
             .arg("h264")
             .arg("-i")
@@ -89,9 +184,9 @@ impl H264DecoderSession {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| error.to_string())?;
+            .stderr(Stdio::null());
+        configure_hidden_process(&mut command);
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
 
         let stdin = child
             .stdin
@@ -136,11 +231,19 @@ impl H264DecoderSession {
             }
         });
 
-        Ok(Self { child, stdin })
+        Ok(Self {
+            child,
+            stdin,
+            flavor,
+        })
     }
 
     fn push_packet(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.stdin.write_all(bytes).map_err(|error| error.to_string())
+    }
+
+    fn flavor(&self) -> H264DecoderFlavor {
+        self.flavor
     }
 }
 
@@ -171,6 +274,8 @@ pub fn spawn_listener(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_decoder: Option<H264DecoderSession> = None;
+                    let mut h264_config: Option<H264Config> = None;
+                    let mut h264_disabled_flavors: Vec<H264DecoderFlavor> = Vec::new();
                     logging::append_log(
                         "INFO",
                         "media",
@@ -205,6 +310,7 @@ pub fn spawn_listener(
                                             if let Ok(config) =
                                                 serde_json::from_slice::<H264Config>(&payload)
                                             {
+                                                h264_config = Some(config);
                                                 logging::append_log(
                                                     "INFO",
                                                     "media.h264_decoder",
@@ -213,7 +319,8 @@ pub fn spawn_listener(
                                                         session_id, config.width, config.height
                                                     ),
                                                 );
-                                                h264_decoder = H264DecoderSession::new(
+                                                h264_decoder = ensure_h264_decoder(
+                                                    &h264_disabled_flavors,
                                                     config.width,
                                                     config.height,
                                                     session_id.clone(),
@@ -223,13 +330,31 @@ pub fn spawn_listener(
                                             }
                                         }
                                         (MediaCodec::H264, MediaPacketKind::Frame) => {
+                                            if h264_decoder.is_none()
+                                                && let Some(config) = h264_config
+                                            {
+                                                h264_decoder = ensure_h264_decoder(
+                                                    &h264_disabled_flavors,
+                                                    config.width,
+                                                    config.height,
+                                                    session_id.clone(),
+                                                    event_tx.clone(),
+                                                )
+                                                .ok();
+                                            }
                                             if let Some(decoder) = &mut h264_decoder {
                                                 if let Err(error) = decoder.push_packet(&payload) {
                                                     logging::append_log(
                                                         "ERROR",
                                                         "media.h264_decoder",
-                                                        format!("packet write failed: {}", error),
+                                                        format!(
+                                                            "packet write failed on {}: {}",
+                                                            decoder.flavor().label(),
+                                                            error
+                                                        ),
                                                     );
+                                                    h264_disabled_flavors.push(decoder.flavor());
+                                                    h264_decoder = None;
                                                 }
                                             }
                                         }
@@ -337,4 +462,28 @@ fn ffmpeg_executable_path() -> PathBuf {
     }
 
     PathBuf::from("ffmpeg")
+}
+
+fn ensure_h264_decoder(
+    disabled_flavors: &[H264DecoderFlavor],
+    width: u32,
+    height: u32,
+    session_id: String,
+    event_tx: Sender<MediaEvent>,
+) -> Result<H264DecoderSession, String> {
+    let Some(flavor) = h264_decoder_candidates()
+        .into_iter()
+        .find(|candidate| !disabled_flavors.contains(candidate))
+    else {
+        return Err("no available h264 decoders after fallback attempts".to_owned());
+    };
+
+    H264DecoderSession::new(width, height, session_id, event_tx, flavor)
+}
+
+fn configure_hidden_process(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
 }

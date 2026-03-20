@@ -607,6 +607,7 @@ name = "bk-wiver-host"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "dxgi-capture-rs",
  "eframe",
  "egui",
  "enigo",
@@ -619,6 +620,7 @@ dependencies = [
  "tungstenite 0.24.0",
  "url",
  "windows-service",
+ "windows-sys 0.59.0",
  "winres",
 ]
 
@@ -1233,6 +1235,15 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "dxgi-capture-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10f4dff36b0b360f70095df1ad9fcd49b5efcb57d3292d44f4e2ffdad671fc60"
+dependencies = [
+ "windows 0.61.3",
+]
 
 [[package]]
 name = "ecolor"
