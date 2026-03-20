@@ -4,6 +4,7 @@
 #define MyAppExeName "bk-wiver-host.exe"
 #define MyAppSource "..\..\..\target\release\bk-wiver-host.exe"
 #define MyAppIcon "..\..\assets\app-icon.ico"
+#define MyFfmpegDir "..\..\third_party\ffmpeg\windows-x64"
 #define MyServiceName "BKWiverHostService"
 #define MyServiceDisplayName "BK-Host Service"
 #define MyAgentTaskName "BK-Host Agent"
@@ -31,6 +32,9 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Files]
 Source: "{#MyAppSource}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyAppIcon}"; DestDir: "{app}"; DestName: "app-icon.ico"; Flags: ignoreversion
+Source: "{#MyFfmpegDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#MyFfmpegDir}\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#MyFfmpegDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{commonprograms}\BK-Host"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app-icon.ico"

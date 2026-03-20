@@ -23,6 +23,10 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Fetch FFmpeg
+        shell: pwsh
+        run: ./scripts/fetch_ffmpeg_windows.ps1
+
       - name: Build release binaries
         run: |
           cargo build --release -p bk-wiver-host

@@ -3,6 +3,10 @@
 /ConsolMac/dist/
 /ConsolMac/.tmp/
 
+/Host/third_party/ffmpeg/windows-x64/ffmpeg.exe
+/Host/third_party/ffmpeg/windows-x64/ffprobe.exe
+/Host/third_party/ffmpeg/windows-x64/*.dll
+
 .DS_Store
 
 .env

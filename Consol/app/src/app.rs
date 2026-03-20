@@ -18,7 +18,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     api::{self, DeviceSummary, PermissionStatus},
-    media::{self, MediaEvent},
+    media::{self, MediaCodec, MediaEvent},
     signal::{self, SignalEvent},
 };
 
@@ -347,6 +347,7 @@ struct ConsoleApp {
     media_listener_key: Option<String>,
     media_stop_flag: Option<Arc<AtomicBool>>,
     media_connected_session_id: Option<String>,
+    media_codec: Option<MediaCodec>,
     media_rx: Receiver<MediaEvent>,
     media_tx: Sender<MediaEvent>,
     session_texture: Option<TextureHandle>,
@@ -396,6 +397,7 @@ impl ConsoleApp {
             media_listener_key: None,
             media_stop_flag: None,
             media_connected_session_id: None,
+            media_codec: None,
             media_rx,
             media_tx,
             session_texture: None,
@@ -590,6 +592,7 @@ impl ConsoleApp {
                     if matched {
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
+                        self.media_codec = None;
                         self.status_line = format!("Сеанс {session_id} отклонён хостом.");
                         self.add_activity(format!("Хост отклонил сеанс {session_id}"));
                     }
@@ -605,6 +608,7 @@ impl ConsoleApp {
                     if matched {
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
+                        self.media_codec = None;
                         self.status_line = format!("Сеанс {session_id} завершён.");
                         self.add_activity(format!("Сеанс {session_id} закрыт"));
                     }
@@ -647,6 +651,7 @@ impl ConsoleApp {
         self.last_session = None;
         self.show_session_window = false;
         self.media_connected_session_id = None;
+        self.media_codec = None;
         self.session_texture = None;
         self.remote_input_captured = false;
         self.apply_hosts(
@@ -667,6 +672,7 @@ impl ConsoleApp {
 
         self.stop_media_listener();
         self.media_connected_session_id = None;
+        self.media_codec = None;
         self.session_texture = None;
         self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.remote_input_captured = false;
@@ -741,6 +747,7 @@ impl ConsoleApp {
             }
             self.stop_media_listener();
             self.media_connected_session_id = None;
+            self.media_codec = None;
             self.remote_input_captured = false;
             return;
         }
@@ -762,6 +769,7 @@ impl ConsoleApp {
                 }
                 self.stop_media_listener();
                 self.media_connected_session_id = None;
+                self.media_codec = None;
                 self.remote_input_captured = false;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
@@ -838,9 +846,14 @@ impl ConsoleApp {
                 MediaEvent::Disconnected { session_id } => {
                     if self.media_connected_session_id.as_deref() == Some(session_id.as_str()) {
                         self.media_connected_session_id = None;
+                        self.media_codec = None;
                     }
                 }
-                MediaEvent::Frame { session_id, bytes } => {
+                MediaEvent::Frame {
+                    session_id,
+                    codec,
+                    bytes,
+                } => {
                     if self
                         .last_session
                         .as_ref()
@@ -850,24 +863,35 @@ impl ConsoleApp {
                         continue;
                     }
 
-                    let Ok(image) = image::load_from_memory(&bytes) else {
-                        continue;
-                    };
-                    let image = image.to_rgba8();
-                    let size = [image.width() as usize, image.height() as usize];
-                    let pixels = image.into_raw();
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                    self.media_codec = Some(codec);
+                    match codec {
+                        MediaCodec::Jpeg => {
+                            let Ok(image) = image::load_from_memory(&bytes) else {
+                                continue;
+                            };
+                            let image = image.to_rgba8();
+                            let size = [image.width() as usize, image.height() as usize];
+                            let pixels = image.into_raw();
+                            let color_image =
+                                egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
 
-                    if let Some(texture) = &mut self.session_texture {
-                        texture.set(color_image, egui::TextureOptions::LINEAR);
-                    } else {
-                        self.session_texture = Some(ctx.load_texture(
-                            "remote-session-frame",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                            if let Some(texture) = &mut self.session_texture {
+                                texture.set(color_image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.session_texture = Some(ctx.load_texture(
+                                    "remote-session-frame",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+                            self.media_connected_session_id = Some(session_id);
+                        }
+                        MediaCodec::H264 => {
+                            self.media_connected_session_id = Some(session_id);
+                            self.status_line = "Получен H.264 media packet. Декодер будет следующим шагом."
+                                .to_owned();
+                        }
                     }
-                    self.media_connected_session_id = Some(session_id);
                 }
             }
         }
@@ -1264,6 +1288,12 @@ impl ConsoleApp {
                                 "media подключён"
                             } else {
                                 "media ожидает кадры"
+                            });
+                            ui.separator();
+                            ui.label(match self.media_codec {
+                                Some(MediaCodec::Jpeg) => "codec jpeg",
+                                Some(MediaCodec::H264) => "codec h264",
+                                None => "codec неизвестен",
                             });
                             ui.separator();
                             ui.label(if self.remote_input_captured {

@@ -1,5 +1,7 @@
 use std::{
+    env,
     io::Cursor,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -18,6 +20,45 @@ use url::Url;
 
 const TEST_FRAME_WIDTH: u32 = 960;
 const TEST_FRAME_HEIGHT: u32 = 540;
+const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
+const MEDIA_PACKET_VERSION: u8 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamCodec {
+    Jpeg,
+    H264,
+}
+
+impl StreamCodec {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpeg",
+            Self::H264 => "h264",
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Jpeg => 1,
+            Self::H264 => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MediaPacketKind {
+    Config,
+    Frame,
+}
+
+impl MediaPacketKind {
+    fn code(self) -> u8 {
+        match self {
+            Self::Config => 1,
+            Self::Frame => 2,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamProfile {
@@ -121,7 +162,9 @@ pub fn spawn_stream(
                             .unwrap_or(true);
                         previous_signature = Some(signature);
 
-                        if socket.send(Message::Binary(frame.into())).is_err() {
+                        let packet =
+                            encode_media_packet(StreamCodec::Jpeg, MediaPacketKind::Frame, &frame);
+                        if socket.send(Message::Binary(packet.into())).is_err() {
                             break;
                         }
 
@@ -264,4 +307,28 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
         "{ws_base}/ws/v1/media?token={token}&sessionId={session_id}"
     ))
     .map_err(|error| error.to_string())
+}
+
+pub fn ffmpeg_executable_path() -> PathBuf {
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let bundled = parent.join("ffmpeg.exe");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+
+    PathBuf::from("ffmpeg")
+}
+
+fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(8 + payload.len());
+    bytes.extend_from_slice(MEDIA_PACKET_MAGIC);
+    bytes.push(MEDIA_PACKET_VERSION);
+    bytes.push(codec.code());
+    bytes.push(kind.code());
+    bytes.push(0);
+    bytes.extend_from_slice(payload);
+    bytes
 }
