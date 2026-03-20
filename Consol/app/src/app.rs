@@ -43,6 +43,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn app_build_label() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let commit = option_env!("BK_WIVER_COMMIT").unwrap_or("dev");
+    format!("build {} ({})", version, shorten_commit(commit))
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum HostState {
     Online,
@@ -1536,6 +1542,12 @@ impl ConsoleApp {
                     ui.separator();
                     ui.label(&self.status_line);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(app_build_label())
+                                .monospace()
+                                .color(Color32::from_rgb(108, 118, 128)),
+                        );
+                        ui.separator();
                         ui.label(format!(
                             "{}: {}",
                             self.tr(TextKey::HostsCount),
@@ -2182,6 +2194,14 @@ fn format_clock(value: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     format!("{hours:02}:{minutes:02}")
+}
+
+fn shorten_commit(commit: &str) -> String {
+    if commit.len() <= 8 {
+        commit.to_owned()
+    } else {
+        commit[..8].to_owned()
+    }
 }
 
 fn build_nav_groups(hosts: &[HostRecord], language: AppLanguage) -> Vec<NavGroup> {
