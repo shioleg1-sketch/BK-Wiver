@@ -21,10 +21,15 @@ use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const TEST_FRAME_WIDTH: u32 = 960;
 const TEST_FRAME_HEIGHT: u32 = 540;
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
@@ -141,7 +146,8 @@ struct H264EncoderSession {
 impl H264EncoderSession {
     fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
         let ffmpeg = ffmpeg_executable_path();
-        let mut child = Command::new(ffmpeg)
+        let mut command = Command::new(ffmpeg);
+        command
             .arg("-loglevel")
             .arg("error")
             .arg("-f")
@@ -174,9 +180,10 @@ impl H264EncoderSession {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| error.to_string())?;
+            .stderr(Stdio::null());
+        configure_hidden_process(&mut command);
+
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
 
         let stdin = child
             .stdin
@@ -503,6 +510,13 @@ fn ensure_h264_encoder(
         .send(Message::Binary(packet.into()))
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn configure_hidden_process(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]) -> Vec<u8> {
