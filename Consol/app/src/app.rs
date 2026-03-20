@@ -108,7 +108,6 @@ struct NavGroup {
 #[derive(Default, Clone)]
 struct SessionPreview {
     session_id: String,
-    session_token: String,
     expires_at_ms: u64,
     state: String,
     target_host_id: String,
@@ -383,6 +382,10 @@ struct ConsoleApp {
     media_rx: Receiver<MediaEvent>,
     media_tx: Sender<MediaEvent>,
     session_texture: Option<TextureHandle>,
+    media_frame_count: u64,
+    media_changed_frame_count: u64,
+    media_last_frame_at_ms: u64,
+    media_last_frame_signature: u64,
     stream_quality_profile: StreamQualityProfile,
     stream_codec_preference: StreamCodecPreference,
     remote_input_captured: bool,
@@ -434,6 +437,10 @@ impl ConsoleApp {
             media_rx,
             media_tx,
             session_texture: None,
+            media_frame_count: 0,
+            media_changed_frame_count: 0,
+            media_last_frame_at_ms: 0,
+            media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Balanced,
             stream_codec_preference: StreamCodecPreference::Auto,
             remote_input_captured: false,
@@ -716,6 +723,10 @@ impl ConsoleApp {
         self.media_connected_session_id = None;
         self.media_codec = None;
         self.session_texture = None;
+        self.media_frame_count = 0;
+        self.media_changed_frame_count = 0;
+        self.media_last_frame_at_ms = 0;
+        self.media_last_frame_signature = 0;
         self.remote_input_captured = false;
         self.apply_hosts(
             demo_hosts(),
@@ -737,6 +748,10 @@ impl ConsoleApp {
         self.media_connected_session_id = None;
         self.media_codec = None;
         self.session_texture = None;
+        self.media_frame_count = 0;
+        self.media_changed_frame_count = 0;
+        self.media_last_frame_at_ms = 0;
+        self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.stream_codec_preference = StreamCodecPreference::Auto;
         self.remote_input_captured = false;
@@ -755,7 +770,6 @@ impl ConsoleApp {
             };
             self.last_session = Some(SessionPreview {
                 session_id: format!("demo_{}", host.id.replace(' ', "")),
-                session_token: "demo".to_owned(),
                 expires_at_ms: now_ms() + 300_000,
                 state: "demo".to_owned(),
                 target_host_id: host.id.clone(),
@@ -784,7 +798,6 @@ impl ConsoleApp {
                 );
                 self.last_session = Some(SessionPreview {
                     session_id: body.session_id.clone(),
-                    session_token: body.session_token,
                     expires_at_ms: body.expires_at_ms,
                     state: "pending".to_owned(),
                     target_host_id: host.id.clone(),
@@ -818,6 +831,11 @@ impl ConsoleApp {
             self.stop_media_listener();
             self.media_connected_session_id = None;
             self.media_codec = None;
+            self.media_frame_count = 0;
+            self.media_changed_frame_count = 0;
+            self.media_last_frame_at_ms = 0;
+            self.media_last_frame_signature = 0;
+            self.session_texture = None;
             self.remote_input_captured = false;
             return;
         }
@@ -840,6 +858,11 @@ impl ConsoleApp {
                 self.stop_media_listener();
                 self.media_connected_session_id = None;
                 self.media_codec = None;
+                self.media_frame_count = 0;
+                self.media_changed_frame_count = 0;
+                self.media_last_frame_at_ms = 0;
+                self.media_last_frame_signature = 0;
+                self.session_texture = None;
                 self.remote_input_captured = false;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
@@ -927,6 +950,11 @@ impl ConsoleApp {
                     if self.media_connected_session_id.as_deref() == Some(session_id.as_str()) {
                         self.media_connected_session_id = None;
                         self.media_codec = None;
+                        self.media_frame_count = 0;
+                        self.media_changed_frame_count = 0;
+                        self.media_last_frame_at_ms = 0;
+                        self.media_last_frame_signature = 0;
+                        self.session_texture = None;
                     }
                 }
                 MediaEvent::Frame {
@@ -946,10 +974,24 @@ impl ConsoleApp {
                     }
 
                     self.media_codec = Some(codec);
+                    self.media_frame_count = self.media_frame_count.saturating_add(1);
+                    self.media_last_frame_at_ms = now_ms();
+                    let signature = frame_signature(&bytes);
+                    if signature != self.media_last_frame_signature {
+                        self.media_changed_frame_count =
+                            self.media_changed_frame_count.saturating_add(1);
+                        self.media_last_frame_signature = signature;
+                    }
                     logging::append_log(
                         "DEBUG",
                         "media.frame",
-                        format!("session_id={} codec={:?} bytes={}", session_id, codec, bytes.len()),
+                        format!(
+                            "session_id={} codec={:?} bytes={} changed_frames={}",
+                            session_id,
+                            codec,
+                            bytes.len(),
+                            self.media_changed_frame_count
+                        ),
                     );
                     match codec {
                         MediaCodec::Jpeg => {
@@ -972,6 +1014,7 @@ impl ConsoleApp {
                                 ));
                             }
                             self.media_connected_session_id = Some(session_id);
+                            ctx.request_repaint();
                         }
                         MediaCodec::H264 => {
                             let (Some(width), Some(height)) = (width, height) else {
@@ -991,6 +1034,7 @@ impl ConsoleApp {
                                 ));
                             }
                             self.media_connected_session_id = Some(session_id);
+                            ctx.request_repaint();
                         }
                     }
                 }
@@ -1397,6 +1441,20 @@ impl ConsoleApp {
                                 Some(MediaCodec::Jpeg) => "codec jpeg",
                                 Some(MediaCodec::H264) => "codec h264",
                                 None => "codec неизвестен",
+                            });
+                            ui.separator();
+                            ui.label(format!("кадров {}", self.media_frame_count));
+                            ui.separator();
+                            ui.label(format!("изменилось {}", self.media_changed_frame_count));
+                            ui.separator();
+                            ui.label(if self.media_last_frame_at_ms == 0 {
+                                "последний кадр: нет".to_owned()
+                            } else {
+                                format!(
+                                    "последний кадр {} ({})",
+                                    format_clock(self.media_last_frame_at_ms),
+                                    format_frame_age(self.media_last_frame_at_ms)
+                                )
                             });
                             ui.separator();
                             ui.label(if self.remote_input_captured {
@@ -1953,7 +2011,14 @@ impl ConsoleApp {
 
 impl App for ConsoleApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(250));
+        let repaint_delay = if self.media_connected_session_id.is_some()
+            && now_ms().saturating_sub(self.media_last_frame_at_ms) < 1_000
+        {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(250)
+        };
+        ctx.request_repaint_after(repaint_delay);
         self.maybe_auto_sign_in();
         self.ensure_signal_listener();
         self.process_signal_events();
@@ -2262,6 +2327,27 @@ fn format_clock(value: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     format!("{hours:02}:{minutes:02}")
+}
+
+fn format_frame_age(value: u64) -> String {
+    if value == 0 {
+        return "нет".to_owned();
+    }
+
+    let elapsed_ms = now_ms().saturating_sub(value);
+    if elapsed_ms < 1_000 {
+        format!("{}мс назад", elapsed_ms)
+    } else {
+        format!("{:.1}с назад", elapsed_ms as f32 / 1000.0)
+    }
+}
+
+fn frame_signature(bytes: &[u8]) -> u64 {
+    let mut signature = bytes.len() as u64;
+    for &byte in bytes.iter().step_by((bytes.len() / 64).max(1)).take(64) {
+        signature = signature.rotate_left(5) ^ u64::from(byte);
+    }
+    signature
 }
 
 fn shorten_commit(commit: &str) -> String {

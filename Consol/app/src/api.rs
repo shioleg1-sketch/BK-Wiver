@@ -62,7 +62,6 @@ struct CreateSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponse {
     pub session_id: String,
-    pub session_token: String,
     pub expires_at_ms: u64,
 }
 

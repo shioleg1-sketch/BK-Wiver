@@ -31,7 +31,6 @@ use crate::{
     signal::{self, SignalEvent},
 };
 
-const HOST_SERVICE_NAME: &str = "BKWiverHostService";
 const HOST_SERVICE_DISPLAY_NAME: &str = "BK-Host Service";
 const HOST_AGENT_TASK_NAME: &str = "BK-Host Agent";
 const HOST_STATE_REFRESH_MS: u64 = 2_000;

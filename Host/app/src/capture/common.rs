@@ -9,13 +9,6 @@ pub struct ScreenshotsCaptureBackend {
 }
 
 impl ScreenshotsCaptureBackend {
-    pub fn new() -> Self {
-        Self {
-            active_screen: select_capture_screen(),
-            backend_name: default_backend_name(),
-        }
-    }
-
     pub fn with_backend_name(backend_name: &'static str) -> Self {
         Self {
             active_screen: select_capture_screen(),
@@ -49,18 +42,6 @@ impl ScreenshotsCaptureBackend {
                 }
             }
         }
-    }
-}
-
-fn default_backend_name() -> &'static str {
-    #[cfg(windows)]
-    {
-        "windows-screenshots"
-    }
-
-    #[cfg(not(windows))]
-    {
-        "screenshots"
     }
 }
 

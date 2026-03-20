@@ -29,7 +29,7 @@ impl CaptureEngine {
             #[cfg(windows)]
             inner: WindowsCaptureEngine::new(),
             #[cfg(not(windows))]
-            inner: ScreenshotsCaptureBackend::new(),
+            inner: ScreenshotsCaptureBackend::with_backend_name("screenshots"),
         }
     }
 
