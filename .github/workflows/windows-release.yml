@@ -1,0 +1,50 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p bk-wiver-host
+          cargo build --release -p bk-wiver-console
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Host installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Host\installer\windows\BK-Wiver-Host.iss"
+
+      - name: Build Console installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Consol\installer\windows\BK-Wiver-Consol.iss"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/BK-Host-Setup.exe
+            dist/BK-Console-Setup.exe
+            target/release/bk-wiver-host.exe
+            target/release/bk-wiver-console.exe
+          generate_release_notes: true
