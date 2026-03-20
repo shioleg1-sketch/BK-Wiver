@@ -21,6 +21,8 @@ use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
+use crate::logging;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -146,6 +148,17 @@ struct H264EncoderSession {
 impl H264EncoderSession {
     fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
         let ffmpeg = ffmpeg_executable_path();
+        logging::append_log(
+            "INFO",
+            "media.h264_encoder",
+            format!(
+                "starting ffmpeg={} width={} height={} fps={}",
+                ffmpeg.display(),
+                width,
+                height,
+                profile.target_fps()
+            ),
+        );
         let mut command = Command::new(ffmpeg);
         command
             .arg("-loglevel")
@@ -324,11 +337,21 @@ pub fn spawn_stream(
                                                 sent_frame = true;
                                             }
                                         } else {
+                                            logging::append_log(
+                                                "WARN",
+                                                "media.h264_encoder",
+                                                "ffmpeg stdin write failed, falling back to jpeg",
+                                            );
                                             h264_encoder = None;
                                         }
                                     }
                                 }
                                 Err(_) => {
+                                    logging::append_log(
+                                        "WARN",
+                                        "media.h264_encoder",
+                                        "failed to start encoder, falling back to jpeg",
+                                    );
                                     h264_encoder = None;
                                 }
                             }
@@ -500,6 +523,11 @@ fn ensure_h264_encoder(
     }
 
     *encoder = Some(H264EncoderSession::new(width, height, profile)?);
+    logging::append_log(
+        "INFO",
+        "media.h264_encoder",
+        format!("config sent width={} height={}", width, height),
+    );
     let config = json!({
         "width": width,
         "height": height,

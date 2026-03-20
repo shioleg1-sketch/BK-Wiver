@@ -26,6 +26,7 @@ use tray_icon::{
 
 use crate::{
     api::{self, DesktopVersion, DeviceRegistration, HostInfoPayload, PermissionStatusPayload},
+    logging,
     media,
     signal::{self, SignalEvent},
 };
@@ -360,6 +361,14 @@ impl HostApp {
         self.server_url_input = self.registration.server_url.clone();
         self.last_heartbeat_attempt_at_ms = 0;
         self.signal_listener_key = None;
+        logging::append_log(
+            "INFO",
+            "host.connect",
+            format!(
+                "device_id={} server_url={}",
+                self.registration.device_id, self.registration.server_url
+            ),
+        );
         self.status_line = self
             .tr(
                 "Host зарегистрирован на сервере и готов к подключениям.",
@@ -389,6 +398,7 @@ impl HostApp {
             .to_owned();
 
         if let Err(error) = self.connect_host() {
+            logging::append_log("WARN", "host.autoconnect", &error);
             self.status_line = error;
         }
     }
@@ -402,6 +412,7 @@ impl HostApp {
             now_ms(),
         )?;
         self.last_heartbeat_attempt_at_ms = now_ms();
+        logging::append_log("DEBUG", "host.heartbeat", "heartbeat sent");
         Ok(())
     }
 
@@ -465,6 +476,7 @@ impl HostApp {
         while let Ok(event) = self.signal_rx.try_recv() {
             match event {
                 SignalEvent::Connected => {
+                    logging::append_log("INFO", "signal", "connected");
                     let current = self.agent_status.clone().unwrap_or_default();
                     self.update_agent_runtime(
                         "running",
@@ -476,6 +488,7 @@ impl HostApp {
                     );
                 }
                 SignalEvent::Disconnected => {
+                    logging::append_log("WARN", "signal", "disconnected, reconnecting");
                     let current = self.agent_status.clone().unwrap_or_default();
                     self.update_agent_runtime(
                         "running",
@@ -490,6 +503,11 @@ impl HostApp {
                     session_id,
                     from_user_id,
                 } => {
+                    logging::append_log(
+                        "INFO",
+                        "session.request",
+                        format!("session_id={} from_user_id={}", session_id, from_user_id),
+                    );
                     self.status_line =
                         format!("Входящий запрос сеанса {session_id} от {from_user_id}.");
                     self.update_agent_runtime(
@@ -506,13 +524,28 @@ impl HostApp {
                         &self.registration.device_token,
                         &session_id,
                     ) {
+                        logging::append_log(
+                            "ERROR",
+                            "session.accept",
+                            format!("session_id={} error={}", session_id, error),
+                        );
                         self.status_line =
                             format!("Не удалось подтвердить сеанс {session_id}: {error}");
                     } else {
+                        logging::append_log(
+                            "INFO",
+                            "session.accept",
+                            format!("session_id={} accepted", session_id),
+                        );
                         self.start_media_stream(&session_id);
                     }
                 }
                 SignalEvent::SessionClosed { session_id } => {
+                    logging::append_log(
+                        "INFO",
+                        "session.closed",
+                        format!("session_id={}", session_id),
+                    );
                     self.stop_media_stream(&session_id);
                     let current_signal_status = self
                         .agent_status
@@ -579,6 +612,16 @@ impl HostApp {
                     profile,
                     codec,
                 } => {
+                    logging::append_log(
+                        "INFO",
+                        "media.feedback",
+                        format!(
+                            "session_id={} profile={} codec={}",
+                            session_id,
+                            profile,
+                            codec.clone().unwrap_or_else(|| "none".to_owned())
+                        ),
+                    );
                     self.update_media_preferences(&session_id, &profile, codec.as_deref());
                 }
             }
@@ -840,6 +883,22 @@ impl App for HostApp {
                     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                 }
+                if ui.button(self.tr("Сохранить лог", "Save log")).clicked() {
+                    self.status_line = match logging::export_diagnostic_report() {
+                        Ok(path) => {
+                            logging::append_log(
+                                "INFO",
+                                "host.log_export",
+                                format!("saved_to={}", path.display()),
+                            );
+                            format!("Лог сохранён: {}", path.display())
+                        }
+                        Err(error) => {
+                            logging::append_log("ERROR", "host.log_export", &error);
+                            format!("Не удалось сохранить лог: {error}")
+                        }
+                    };
+                }
                 if ui.button(self.tr("Скрыть", "Hide")).clicked() {
                     self.show_id_window = false;
                     self.main_window_visible = false;
@@ -901,6 +960,7 @@ impl App for HostApp {
                     if ui.button(self.tr("Подключить Host", "Connect Host")).clicked() {
                         let result = self.connect_host();
                         if let Err(error) = result {
+                            logging::append_log("ERROR", "host.connect", &error);
                             self.status_line = error;
                         }
                         self.refresh();
@@ -910,7 +970,10 @@ impl App for HostApp {
                             Ok(()) => self
                                 .tr("Heartbeat отправлен на сервер.", "Heartbeat sent to the server.")
                                 .to_owned(),
-                            Err(error) => error,
+                            Err(error) => {
+                                logging::append_log("ERROR", "host.heartbeat", &error);
+                                error
+                            }
                         };
                         self.refresh();
                     }
