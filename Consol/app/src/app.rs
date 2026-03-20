@@ -18,6 +18,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     api::{self, DeviceSummary, PermissionStatus},
+    logging,
     media::{self, MediaCodec, MediaEvent},
     signal::{self, SignalEvent},
 };
@@ -533,6 +534,11 @@ impl ConsoleApp {
                 self.server_url = server_url;
                 self.access_token = Some(body.access_token);
                 self.signal_listener_key = None;
+                logging::append_log(
+                    "INFO",
+                    "console.sign_in",
+                    format!("server_url={} login={}", self.server_url, login),
+                );
                 self.status_line =
                     "Вход выполнен успешно. Загружаю список устройств с сервера.".to_owned();
                 self.add_activity("Оператор вошёл в систему");
@@ -540,6 +546,7 @@ impl ConsoleApp {
                 self.refresh_devices();
             }
             Err(error) => {
+                logging::append_log("ERROR", "console.sign_in", &error);
                 self.status_line = error;
                 self.add_activity("Попытка входа завершилась ошибкой");
             }
@@ -582,6 +589,7 @@ impl ConsoleApp {
         while let Ok(event) = self.signal_rx.try_recv() {
             match event {
                 SignalEvent::Connected => {
+                    logging::append_log("INFO", "signal", "connected");
                     if !self.using_demo_data {
                         self.connection_note = format!(
                             "Подключено к {}. Signal channel активен.",
@@ -590,6 +598,7 @@ impl ConsoleApp {
                     }
                 }
                 SignalEvent::Disconnected => {
+                    logging::append_log("WARN", "signal", "disconnected, reconnecting");
                     if !self.using_demo_data {
                         self.connection_note = format!(
                             "Подключено к {}. Signal channel переподключается.",
@@ -606,6 +615,11 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        logging::append_log(
+                            "INFO",
+                            "session.accepted",
+                            format!("session_id={}", session_id),
+                        );
                         self.show_session_window = true;
                         self.status_line = format!("Сеанс {session_id} подтверждён хостом.");
                         self.add_activity(format!("Хост подтвердил сеанс {session_id}"));
@@ -623,6 +637,11 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        logging::append_log(
+                            "WARN",
+                            "session.rejected",
+                            format!("session_id={}", session_id),
+                        );
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
                         self.media_codec = None;
@@ -639,6 +658,11 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        logging::append_log(
+                            "INFO",
+                            "session.closed",
+                            format!("session_id={}", session_id),
+                        );
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
                         self.media_codec = None;
@@ -661,6 +685,11 @@ impl ConsoleApp {
         match api::fetch_devices(&self.client, &server_url, &token) {
             Ok(body) => {
                 let count = body.devices.len();
+                logging::append_log(
+                    "INFO",
+                    "devices.refresh",
+                    format!("count={} server_url={}", count, server_url),
+                );
                 let hosts = body.devices.into_iter().map(HostRecord::from).collect();
                 self.apply_hosts(
                     hosts,
@@ -671,6 +700,7 @@ impl ConsoleApp {
                 self.add_activity(format!("Список устройств обновлён с {server_url}"));
             }
             Err(error) => {
+                logging::append_log("ERROR", "devices.refresh", &error);
                 self.status_line = error;
                 self.add_activity("Не удалось обновить список устройств");
             }
@@ -747,6 +777,11 @@ impl ConsoleApp {
             &host.id,
         ) {
             Ok(body) => {
+                logging::append_log(
+                    "INFO",
+                    "session.create",
+                    format!("session_id={} host={}", body.session_id, host.id),
+                );
                 self.last_session = Some(SessionPreview {
                     session_id: body.session_id.clone(),
                     session_token: body.session_token,
@@ -763,6 +798,7 @@ impl ConsoleApp {
                 self.add_activity(format!("Создан сеанс для {}", host.name));
             }
             Err(error) => {
+                logging::append_log("ERROR", "session.create", &error);
                 self.status_line = error;
                 self.add_activity(format!("Не удалось создать сеанс для {}", host.name));
             }
@@ -868,6 +904,11 @@ impl ConsoleApp {
         while let Ok(event) = self.media_rx.try_recv() {
             match event {
                 MediaEvent::Connected { session_id } => {
+                    logging::append_log(
+                        "INFO",
+                        "media",
+                        format!("connected session_id={}", session_id),
+                    );
                     if self
                         .last_session
                         .as_ref()
@@ -878,6 +919,11 @@ impl ConsoleApp {
                     }
                 }
                 MediaEvent::Disconnected { session_id } => {
+                    logging::append_log(
+                        "WARN",
+                        "media",
+                        format!("disconnected session_id={}", session_id),
+                    );
                     if self.media_connected_session_id.as_deref() == Some(session_id.as_str()) {
                         self.media_connected_session_id = None;
                         self.media_codec = None;
@@ -900,6 +946,11 @@ impl ConsoleApp {
                     }
 
                     self.media_codec = Some(codec);
+                    logging::append_log(
+                        "DEBUG",
+                        "media.frame",
+                        format!("session_id={} codec={:?} bytes={}", session_id, codec, bytes.len()),
+                    );
                     match codec {
                         MediaCodec::Jpeg => {
                             let Ok(image) = image::load_from_memory(&bytes) else {
@@ -1473,6 +1524,23 @@ impl ConsoleApp {
                     let _ = menu_button(ui, "Wake-on-LAN");
                     let _ = menu_button(ui, self.tr(TextKey::Statistics));
                     let _ = menu_button(ui, self.tr(TextKey::Tools));
+                    if menu_button(ui, "Сохранить лог").clicked() {
+                        self.status_line = match logging::export_diagnostic_report(&self.status_line)
+                        {
+                            Ok(path) => {
+                                logging::append_log(
+                                    "INFO",
+                                    "console.log_export",
+                                    format!("saved_to={}", path.display()),
+                                );
+                                format!("Лог сохранён: {}", path.display())
+                            }
+                            Err(error) => {
+                                logging::append_log("ERROR", "console.log_export", &error);
+                                format!("Не удалось сохранить лог: {error}")
+                            }
+                        };
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let search_hint = self.tr(TextKey::SearchHosts);

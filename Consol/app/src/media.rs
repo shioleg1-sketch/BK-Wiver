@@ -16,6 +16,8 @@ use serde::Deserialize;
 use tungstenite::{Message, connect};
 use url::Url;
 
+use crate::logging;
+
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
 
@@ -57,7 +59,19 @@ struct H264Config {
 
 impl H264DecoderSession {
     fn new(width: u32, height: u32, session_id: String, event_tx: Sender<MediaEvent>) -> Result<Self, String> {
-        let mut child = Command::new(ffmpeg_executable_path())
+        let ffmpeg = ffmpeg_executable_path();
+        logging::append_log(
+            "INFO",
+            "media.h264_decoder",
+            format!(
+                "starting ffmpeg={} width={} height={} session_id={}",
+                ffmpeg.display(),
+                width,
+                height,
+                session_id
+            ),
+        );
+        let mut child = Command::new(ffmpeg)
             .arg("-loglevel")
             .arg("error")
             .arg("-fflags")
@@ -93,10 +107,24 @@ impl H264DecoderSession {
                 .saturating_mul(height as usize)
                 .saturating_mul(4);
             let mut frame = vec![0_u8; frame_len];
+            let mut frame_count = 0_u64;
 
             loop {
                 if stdout.read_exact(&mut frame).is_err() {
+                    logging::append_log(
+                        "WARN",
+                        "media.h264_decoder",
+                        "decoder stdout ended or frame read failed",
+                    );
                     break;
+                }
+                frame_count = frame_count.saturating_add(1);
+                if frame_count == 1 || frame_count % 120 == 0 {
+                    logging::append_log(
+                        "INFO",
+                        "media.h264_decoder",
+                        format!("decoded_frames={}", frame_count),
+                    );
                 }
                 let _ = event_tx.send(MediaEvent::Frame {
                     session_id: session_id.clone(),
@@ -143,6 +171,11 @@ pub fn spawn_listener(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_decoder: Option<H264DecoderSession> = None;
+                    logging::append_log(
+                        "INFO",
+                        "media",
+                        format!("connected session_id={}", session_id),
+                    );
                     let _ = event_tx.send(MediaEvent::Connected {
                         session_id: session_id.clone(),
                     });
@@ -155,6 +188,11 @@ pub fn spawn_listener(
                                 {
                                     match (codec, kind) {
                                         (MediaCodec::Jpeg, MediaPacketKind::Frame) => {
+                                            logging::append_log(
+                                                "DEBUG",
+                                                "media.jpeg",
+                                                format!("jpeg frame session_id={}", session_id),
+                                            );
                                             let _ = event_tx.send(MediaEvent::Frame {
                                                 session_id: session_id.clone(),
                                                 codec,
@@ -167,6 +205,14 @@ pub fn spawn_listener(
                                             if let Ok(config) =
                                                 serde_json::from_slice::<H264Config>(&payload)
                                             {
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.h264_decoder",
+                                                    format!(
+                                                        "config received session_id={} width={} height={}",
+                                                        session_id, config.width, config.height
+                                                    ),
+                                                );
                                                 h264_decoder = H264DecoderSession::new(
                                                     config.width,
                                                     config.height,
@@ -178,7 +224,13 @@ pub fn spawn_listener(
                                         }
                                         (MediaCodec::H264, MediaPacketKind::Frame) => {
                                             if let Some(decoder) = &mut h264_decoder {
-                                                let _ = decoder.push_packet(&payload);
+                                                if let Err(error) = decoder.push_packet(&payload) {
+                                                    logging::append_log(
+                                                        "ERROR",
+                                                        "media.h264_decoder",
+                                                        format!("packet write failed: {}", error),
+                                                    );
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -196,9 +248,20 @@ pub fn spawn_listener(
 
                     let _ = socket.close(None);
                 }
-                Err(_) => {}
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "media",
+                        format!("connect failed session_id={} error={}", session_id, error),
+                    );
+                }
             }
 
+            logging::append_log(
+                "WARN",
+                "media",
+                format!("disconnected session_id={}", session_id),
+            );
             let _ = event_tx.send(MediaEvent::Disconnected {
                 session_id: session_id.clone(),
             });

@@ -11,6 +11,10 @@ mod app;
 mod media;
 
 #[cfg(target_os = "macos")]
+#[path = "../../../Consol/app/src/logging.rs"]
+mod logging;
+
+#[cfg(target_os = "macos")]
 #[path = "../../../Consol/app/src/signal.rs"]
 mod signal;
 
