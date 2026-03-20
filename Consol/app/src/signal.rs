@@ -71,28 +71,6 @@ pub fn send_session_closed(server_url: &str, token: &str, session_id: &str) -> R
     )
 }
 
-pub fn send_mouse_click(
-    server_url: &str,
-    token: &str,
-    session_id: &str,
-    x_norm: f32,
-    y_norm: f32,
-    button: &str,
-) -> Result<(), String> {
-    send_message(
-        server_url,
-        token,
-        json!({
-            "type": "session.input_mouse",
-            "sessionId": session_id,
-            "action": "click",
-            "button": button,
-            "xNorm": x_norm,
-            "yNorm": y_norm,
-        }),
-    )
-}
-
 pub fn send_mouse_event(
     server_url: &str,
     token: &str,
@@ -152,6 +130,23 @@ pub fn send_key_named(
             "sessionId": session_id,
             "kind": "named",
             "key": key,
+        }),
+    )
+}
+
+pub fn send_media_feedback(
+    server_url: &str,
+    token: &str,
+    session_id: &str,
+    profile: &str,
+) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.media_feedback",
+            "sessionId": session_id,
+            "profile": profile,
         }),
     )
 }

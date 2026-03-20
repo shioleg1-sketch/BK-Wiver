@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -93,6 +93,11 @@ struct AgentRuntimeStatus {
     session_peer: String,
     #[serde(rename = "signalStatus")]
     signal_status: String,
+}
+
+struct HostMediaSession {
+    stop_flag: Arc<AtomicBool>,
+    profile: Arc<Mutex<media::StreamProfile>>,
 }
 
 enum HostUiCommand {
@@ -207,7 +212,7 @@ struct HostApp {
     last_heartbeat_attempt_at_ms: u64,
     last_auto_connect_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
-    media_stop_flags: BTreeMap<String, Arc<AtomicBool>>,
+    media_sessions: BTreeMap<String, HostMediaSession>,
     command_rx: Receiver<HostUiCommand>,
     signal_rx: Receiver<SignalEvent>,
     signal_tx: Sender<SignalEvent>,
@@ -237,7 +242,7 @@ impl HostApp {
             last_heartbeat_attempt_at_ms: 0,
             last_auto_connect_attempt_at_ms: 0,
             signal_listener_key: None,
-            media_stop_flags: BTreeMap::new(),
+            media_sessions: BTreeMap::new(),
             command_rx,
             signal_rx,
             signal_tx,
@@ -503,7 +508,7 @@ impl HostApp {
                         self.status_line =
                             format!("Не удалось подтвердить сеанс {session_id}: {error}");
                     } else {
-                        self.start_test_media_stream(&session_id);
+                        self.start_media_stream(&session_id);
                     }
                 }
                 SignalEvent::SessionClosed { session_id } => {
@@ -568,6 +573,12 @@ impl HostApp {
                         );
                     }
                 },
+                SignalEvent::MediaFeedback {
+                    session_id,
+                    profile,
+                } => {
+                    self.update_media_profile(&session_id, &profile);
+                }
             }
         }
     }
@@ -664,8 +675,8 @@ impl HostApp {
         Ok(())
     }
 
-    fn start_test_media_stream(&mut self, session_id: &str) {
-        if self.media_stop_flags.contains_key(session_id)
+    fn start_media_stream(&mut self, session_id: &str) {
+        if self.media_sessions.contains_key(session_id)
             || self.registration.server_url.trim().is_empty()
             || self.registration.device_token.trim().is_empty()
         {
@@ -673,25 +684,41 @@ impl HostApp {
         }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        media::spawn_test_stream(
+        let profile = Arc::new(Mutex::new(media::StreamProfile::Balanced));
+        media::spawn_stream(
             self.registration.server_url.clone(),
             self.registration.device_token.clone(),
             session_id.to_owned(),
             stop_flag.clone(),
+            profile.clone(),
         );
-        self.media_stop_flags
-            .insert(session_id.to_owned(), stop_flag);
+        self.media_sessions.insert(
+            session_id.to_owned(),
+            HostMediaSession { stop_flag, profile },
+        );
+    }
+
+    fn update_media_profile(&mut self, session_id: &str, profile: &str) {
+        if let Some(session) = self.media_sessions.get(session_id)
+            && let Ok(mut current_profile) = session.profile.lock()
+        {
+            *current_profile = media::StreamProfile::from_wire(profile);
+            self.status_line = format!(
+                "Профиль качества для сеанса {session_id} переключён на {}.",
+                current_profile.wire_name()
+            );
+        }
     }
 
     fn stop_media_stream(&mut self, session_id: &str) {
-        if let Some(stop_flag) = self.media_stop_flags.remove(session_id) {
-            stop_flag.store(true, Ordering::Relaxed);
+        if let Some(session) = self.media_sessions.remove(session_id) {
+            session.stop_flag.store(true, Ordering::Relaxed);
         }
     }
 
     fn stop_all_media_streams(&mut self) {
-        for (_, stop_flag) in std::mem::take(&mut self.media_stop_flags) {
-            stop_flag.store(true, Ordering::Relaxed);
+        for (_, session) in std::mem::take(&mut self.media_sessions) {
+            session.stop_flag.store(true, Ordering::Relaxed);
         }
     }
 

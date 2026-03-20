@@ -108,6 +108,31 @@ struct SessionPreview {
     target_host_name: String,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StreamQualityProfile {
+    Fast,
+    Balanced,
+    Sharp,
+}
+
+impl StreamQualityProfile {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Balanced => "balanced",
+            Self::Sharp => "sharp",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Balanced => "Balanced",
+            Self::Sharp => "Sharp",
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AppLanguage {
@@ -325,6 +350,7 @@ struct ConsoleApp {
     media_rx: Receiver<MediaEvent>,
     media_tx: Sender<MediaEvent>,
     session_texture: Option<TextureHandle>,
+    stream_quality_profile: StreamQualityProfile,
     remote_input_captured: bool,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
@@ -373,6 +399,7 @@ impl ConsoleApp {
             media_rx,
             media_tx,
             session_texture: None,
+            stream_quality_profile: StreamQualityProfile::Balanced,
             remote_input_captured: false,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
@@ -547,6 +574,9 @@ impl ConsoleApp {
                         self.show_session_window = true;
                         self.status_line = format!("Сеанс {session_id} подтверждён хостом.");
                         self.add_activity(format!("Хост подтвердил сеанс {session_id}"));
+                        if let Some(session) = self.last_session.clone() {
+                            self.sync_stream_profile(&session);
+                        }
                     }
                 }
                 SignalEvent::SessionRejected { session_id } => {
@@ -638,6 +668,7 @@ impl ConsoleApp {
         self.stop_media_listener();
         self.media_connected_session_id = None;
         self.session_texture = None;
+        self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.remote_input_captured = false;
 
         if self.using_demo_data || !self.signed_in() {
@@ -1160,6 +1191,29 @@ impl ConsoleApp {
         }
     }
 
+    fn sync_stream_profile(&mut self, session: &SessionPreview) {
+        if self.using_demo_data || session.state == "demo" {
+            return;
+        }
+        let Some(token) = self.access_token.clone() else {
+            return;
+        };
+
+        if let Err(error) = signal::send_media_feedback(
+            &normalize_server_url(&self.server_url),
+            &token,
+            &session.session_id,
+            self.stream_quality_profile.wire_name(),
+        ) {
+            self.status_line = format!("Не удалось переключить профиль качества: {error}");
+        } else {
+            self.status_line = format!(
+                "Профиль качества переключён на {}.",
+                self.stream_quality_profile.label()
+            );
+        }
+    }
+
     fn session_window(&mut self, ctx: &Context) {
         if !self.show_session_window {
             return;
@@ -1217,6 +1271,30 @@ impl ConsoleApp {
                             } else {
                                 "кликните по экрану для захвата ввода"
                             });
+                            ui.separator();
+                            let previous_profile = self.stream_quality_profile;
+                            egui::ComboBox::from_id_salt("session_quality_profile")
+                                .selected_text(self.stream_quality_profile.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.stream_quality_profile,
+                                        StreamQualityProfile::Fast,
+                                        StreamQualityProfile::Fast.label(),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.stream_quality_profile,
+                                        StreamQualityProfile::Balanced,
+                                        StreamQualityProfile::Balanced.label(),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.stream_quality_profile,
+                                        StreamQualityProfile::Sharp,
+                                        StreamQualityProfile::Sharp.label(),
+                                    );
+                                });
+                            if self.stream_quality_profile != previous_profile {
+                                self.sync_stream_profile(&session);
+                            }
                         });
                     });
 

@@ -31,6 +31,10 @@ pub enum SignalEvent {
         key: String,
         text: String,
     },
+    MediaFeedback {
+        session_id: String,
+        profile: String,
+    },
 }
 
 pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<SignalEvent>) {
@@ -157,6 +161,14 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
                 .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
+                .to_owned(),
+        }),
+        "session.media_feedback" => Some(SignalEvent::MediaFeedback {
+            session_id: payload.get("sessionId")?.as_str()?.to_owned(),
+            profile: payload
+                .get("profile")
+                .and_then(Value::as_str)
+                .unwrap_or("balanced")
                 .to_owned(),
         }),
         _ => None,
