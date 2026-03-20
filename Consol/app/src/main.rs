@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod media;
 mod signal;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

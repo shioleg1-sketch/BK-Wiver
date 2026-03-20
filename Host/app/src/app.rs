@@ -6,6 +6,7 @@ use eframe::{
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::PathBuf,
     process::Command,
@@ -23,6 +24,7 @@ use tray_icon::{
 
 use crate::{
     api::{self, DesktopVersion, DeviceRegistration, HostInfoPayload, PermissionStatusPayload},
+    media,
     signal::{self, SignalEvent},
 };
 
@@ -203,6 +205,7 @@ struct HostApp {
     last_heartbeat_attempt_at_ms: u64,
     last_auto_connect_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
+    media_stop_flags: BTreeMap<String, Arc<AtomicBool>>,
     command_rx: Receiver<HostUiCommand>,
     signal_rx: Receiver<SignalEvent>,
     signal_tx: Sender<SignalEvent>,
@@ -232,6 +235,7 @@ impl HostApp {
             last_heartbeat_attempt_at_ms: 0,
             last_auto_connect_attempt_at_ms: 0,
             signal_listener_key: None,
+            media_stop_flags: BTreeMap::new(),
             command_rx,
             signal_rx,
             signal_tx,
@@ -311,6 +315,7 @@ impl HostApp {
     }
 
     fn connect_host(&mut self) -> Result<(), String> {
+        self.stop_all_media_streams();
         let server_url = self.normalized_server_url();
         let login = if self.login_input.trim().is_empty() {
             DEFAULT_OPERATOR_LOGIN
@@ -495,9 +500,12 @@ impl HostApp {
                     ) {
                         self.status_line =
                             format!("Не удалось подтвердить сеанс {session_id}: {error}");
+                    } else {
+                        self.start_test_media_stream(&session_id);
                     }
                 }
                 SignalEvent::SessionClosed { session_id } => {
+                    self.stop_media_stream(&session_id);
                     let current_signal_status = self
                         .agent_status
                         .as_ref()
@@ -514,6 +522,37 @@ impl HostApp {
                     );
                 }
             }
+        }
+    }
+
+    fn start_test_media_stream(&mut self, session_id: &str) {
+        if self.media_stop_flags.contains_key(session_id)
+            || self.registration.server_url.trim().is_empty()
+            || self.registration.device_token.trim().is_empty()
+        {
+            return;
+        }
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        media::spawn_test_stream(
+            self.registration.server_url.clone(),
+            self.registration.device_token.clone(),
+            session_id.to_owned(),
+            stop_flag.clone(),
+        );
+        self.media_stop_flags
+            .insert(session_id.to_owned(), stop_flag);
+    }
+
+    fn stop_media_stream(&mut self, session_id: &str) {
+        if let Some(stop_flag) = self.media_stop_flags.remove(session_id) {
+            stop_flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn stop_all_media_streams(&mut self) {
+        for (_, stop_flag) in std::mem::take(&mut self.media_stop_flags) {
+            stop_flag.store(true, Ordering::Relaxed);
         }
     }
 

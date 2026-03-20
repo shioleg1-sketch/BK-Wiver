@@ -1,4 +1,8 @@
 use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -6,14 +10,15 @@ use eframe::{
     App, CreationContext, NativeOptions,
     egui::{
         self, Align, Button, CentralPanel, Color32, Context, CornerRadius, Frame, Grid, Layout,
-        RichText, ScrollArea, Sense, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui, Vec2,
-        ViewportBuilder,
+        RichText, ScrollArea, Sense, SidePanel, Stroke, TextEdit, TextureHandle, TopBottomPanel,
+        Ui, Vec2, ViewportBuilder,
     },
 };
 use reqwest::blocking::Client;
 
 use crate::{
     api::{self, DeviceSummary, PermissionStatus},
+    media::{self, MediaEvent},
     signal::{self, SignalEvent},
 };
 
@@ -99,6 +104,8 @@ struct SessionPreview {
     session_token: String,
     expires_at_ms: u64,
     state: String,
+    target_host_id: String,
+    target_host_name: String,
 }
 
 #[allow(dead_code)]
@@ -311,6 +318,13 @@ struct ConsoleApp {
     hosts: Vec<HostRecord>,
     activity_log: Vec<String>,
     last_session: Option<SessionPreview>,
+    show_session_window: bool,
+    media_listener_key: Option<String>,
+    media_stop_flag: Option<Arc<AtomicBool>>,
+    media_connected_session_id: Option<String>,
+    media_rx: Receiver<MediaEvent>,
+    media_tx: Sender<MediaEvent>,
+    session_texture: Option<TextureHandle>,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     signal_tx: Sender<SignalEvent>,
@@ -324,6 +338,7 @@ impl ConsoleApp {
         let hosts = demo_hosts();
         let nav_groups = build_nav_groups(&hosts, AppLanguage::Ru);
         let (signal_tx, signal_rx) = unbounded::<SignalEvent>();
+        let (media_tx, media_rx) = unbounded::<MediaEvent>();
 
         let mut app = Self {
             language: AppLanguage::Ru,
@@ -350,6 +365,13 @@ impl ConsoleApp {
                 "09:18  Ожидание автоматического входа на сервер".to_owned(),
             ],
             last_session: None,
+            show_session_window: false,
+            media_listener_key: None,
+            media_stop_flag: None,
+            media_connected_session_id: None,
+            media_rx,
+            media_tx,
+            session_texture: None,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
             signal_tx,
@@ -520,6 +542,7 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        self.show_session_window = true;
                         self.status_line = format!("Сеанс {session_id} подтверждён хостом.");
                         self.add_activity(format!("Хост подтвердил сеанс {session_id}"));
                     }
@@ -533,6 +556,8 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        self.stop_media_listener();
+                        self.media_connected_session_id = None;
                         self.status_line = format!("Сеанс {session_id} отклонён хостом.");
                         self.add_activity(format!("Хост отклонил сеанс {session_id}"));
                     }
@@ -546,6 +571,8 @@ impl ConsoleApp {
                         }
                     }
                     if matched {
+                        self.stop_media_listener();
+                        self.media_connected_session_id = None;
                         self.status_line = format!("Сеанс {session_id} завершён.");
                         self.add_activity(format!("Сеанс {session_id} закрыт"));
                     }
@@ -582,9 +609,13 @@ impl ConsoleApp {
     }
 
     fn switch_to_demo_mode(&mut self) {
+        self.stop_media_listener();
         self.access_token = None;
         self.signal_listener_key = None;
         self.last_session = None;
+        self.show_session_window = false;
+        self.media_connected_session_id = None;
+        self.session_texture = None;
         self.apply_hosts(
             demo_hosts(),
             true,
@@ -600,6 +631,10 @@ impl ConsoleApp {
             self.status_line = "Выберите хост перед началом сеанса.".to_owned();
             return;
         };
+
+        self.stop_media_listener();
+        self.media_connected_session_id = None;
+        self.session_texture = None;
 
         if self.using_demo_data || !self.signed_in() {
             self.status_line = if view_only {
@@ -618,7 +653,10 @@ impl ConsoleApp {
                 session_token: "demo".to_owned(),
                 expires_at_ms: now_ms() + 300_000,
                 state: "demo".to_owned(),
+                target_host_id: host.id.clone(),
+                target_host_name: host.name.clone(),
             });
+            self.show_session_window = true;
             self.add_activity(format!("Открыт демонстрационный сеанс для {}", host.name));
             return;
         }
@@ -639,7 +677,10 @@ impl ConsoleApp {
                     session_token: body.session_token,
                     expires_at_ms: body.expires_at_ms,
                     state: "pending".to_owned(),
+                    target_host_id: host.id.clone(),
+                    target_host_name: host.name.clone(),
                 });
+                self.show_session_window = true;
                 self.status_line = format!(
                     "Сеанс {} создан для {}. Ожидаем handshake.",
                     body.session_id, host.name
@@ -663,6 +704,8 @@ impl ConsoleApp {
             if let Some(active) = &mut self.last_session {
                 active.state = "closed".to_owned();
             }
+            self.stop_media_listener();
+            self.media_connected_session_id = None;
             return;
         }
 
@@ -681,6 +724,8 @@ impl ConsoleApp {
                 if let Some(active) = &mut self.last_session {
                     active.state = "closed".to_owned();
                 }
+                self.stop_media_listener();
+                self.media_connected_session_id = None;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
                     session.session_id
@@ -691,6 +736,394 @@ impl ConsoleApp {
                     format!("Не удалось завершить сеанс {}: {error}", session.session_id);
             }
         }
+    }
+
+    fn stop_media_listener(&mut self) {
+        if let Some(stop_flag) = self.media_stop_flag.take() {
+            stop_flag.store(true, Ordering::Relaxed);
+        }
+        self.media_listener_key = None;
+    }
+
+    fn ensure_media_listener(&mut self) {
+        if self.using_demo_data {
+            self.stop_media_listener();
+            return;
+        }
+
+        let Some(session) = self.last_session.clone() else {
+            self.stop_media_listener();
+            return;
+        };
+
+        if matches!(session.state.as_str(), "closed" | "rejected") {
+            self.stop_media_listener();
+            return;
+        }
+
+        let Some(token) = self.access_token.clone() else {
+            self.stop_media_listener();
+            return;
+        };
+
+        let server_url = normalize_server_url(&self.server_url);
+        let key = format!("{server_url}|{}|{}", session.session_id, token);
+        if self.media_listener_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+
+        self.stop_media_listener();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        media::spawn_listener(
+            server_url,
+            token,
+            session.session_id,
+            stop_flag.clone(),
+            self.media_tx.clone(),
+        );
+        self.media_stop_flag = Some(stop_flag);
+        self.media_listener_key = Some(key);
+    }
+
+    fn process_media_events(&mut self, ctx: &Context) {
+        while let Ok(event) = self.media_rx.try_recv() {
+            match event {
+                MediaEvent::Connected { session_id } => {
+                    if self
+                        .last_session
+                        .as_ref()
+                        .map(|session| session.session_id.as_str())
+                        == Some(session_id.as_str())
+                    {
+                        self.media_connected_session_id = Some(session_id);
+                    }
+                }
+                MediaEvent::Disconnected { session_id } => {
+                    if self.media_connected_session_id.as_deref() == Some(session_id.as_str()) {
+                        self.media_connected_session_id = None;
+                    }
+                }
+                MediaEvent::Frame { session_id, bytes } => {
+                    if self
+                        .last_session
+                        .as_ref()
+                        .map(|session| session.session_id.as_str())
+                        != Some(session_id.as_str())
+                    {
+                        continue;
+                    }
+
+                    let Ok(image) = image::load_from_memory(&bytes) else {
+                        continue;
+                    };
+                    let image = image.to_rgba8();
+                    let size = [image.width() as usize, image.height() as usize];
+                    let pixels = image.into_raw();
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+
+                    if let Some(texture) = &mut self.session_texture {
+                        texture.set(color_image, egui::TextureOptions::LINEAR);
+                    } else {
+                        self.session_texture = Some(ctx.load_texture(
+                            "remote-session-frame",
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                    self.media_connected_session_id = Some(session_id);
+                }
+            }
+        }
+    }
+
+    fn session_status_label(session_state: &str) -> &'static str {
+        match session_state {
+            "pending" => "Ожидает подтверждения",
+            "connected" => "Подключено",
+            "closed" => "Завершён",
+            "rejected" => "Отклонён",
+            "demo" => "Демо-сеанс",
+            _ => "Неизвестно",
+        }
+    }
+
+    fn session_status_colors(session_state: &str) -> (Color32, Color32) {
+        match session_state {
+            "connected" => (
+                Color32::from_rgb(47, 120, 62),
+                Color32::from_rgb(224, 241, 228),
+            ),
+            "pending" => (
+                Color32::from_rgb(47, 92, 141),
+                Color32::from_rgb(223, 232, 243),
+            ),
+            "demo" => (
+                Color32::from_rgb(145, 102, 60),
+                Color32::from_rgb(245, 233, 219),
+            ),
+            "rejected" | "closed" => (
+                Color32::from_rgb(126, 82, 58),
+                Color32::from_rgb(241, 229, 219),
+            ),
+            _ => (
+                Color32::from_rgb(108, 115, 124),
+                Color32::from_rgb(232, 236, 240),
+            ),
+        }
+    }
+
+    fn session_stage_note(session_state: &str) -> &'static str {
+        match session_state {
+            "pending" => {
+                "Сеанс создан. Ожидаем подтверждение хоста перед запуском удалённого рабочего стола."
+            }
+            "connected" => {
+                "Handshake завершён. Это подготовленное окно сеанса: сюда следующим шагом можно выводить кадры экрана и принимать ввод."
+            }
+            "closed" => "Сеанс уже завершён. Окно можно закрыть или создать новый сеанс.",
+            "rejected" => {
+                "Хост отклонил подключение. Проверьте состояние устройства и повторите попытку."
+            }
+            "demo" => {
+                "Это локальный демонстрационный сеанс. Он помогает проверить UI без живого соединения."
+            }
+            _ => "Состояние сеанса получено, но ещё не отображается отдельным сценарием.",
+        }
+    }
+
+    fn remote_view_placeholder(&self, ui: &mut Ui, session: &SessionPreview) {
+        let available = ui.available_size_before_wrap();
+        let desired_height = available.y.max(260.0);
+        let desired_size = Vec2::new(available.x.max(320.0), desired_height);
+        let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
+
+        let fill = match session.state.as_str() {
+            "connected" => Color32::from_rgb(23, 31, 43),
+            "pending" => Color32::from_rgb(38, 49, 63),
+            "demo" => Color32::from_rgb(53, 45, 36),
+            "closed" | "rejected" => Color32::from_rgb(50, 50, 52),
+            _ => Color32::from_rgb(36, 40, 45),
+        };
+
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(12), fill);
+        if let Some(texture) = &self.session_texture {
+            painter.image(
+                texture.id(),
+                rect.shrink2(Vec2::new(10.0, 42.0)),
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(0.0, 0.0),
+                    egui::Pos2::new(1.0, 1.0),
+                ),
+                Color32::WHITE,
+            );
+        }
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(12),
+            Stroke::new(1.0, Color32::from_rgb(74, 86, 100)),
+            egui::StrokeKind::Inside,
+        );
+
+        let header_rect = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), 34.0));
+        painter.rect_filled(
+            header_rect,
+            CornerRadius {
+                nw: 12,
+                ne: 12,
+                sw: 0,
+                se: 0,
+            },
+            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+        );
+        painter.text(
+            header_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "BK Remote Session",
+            egui::FontId::proportional(16.0),
+            Color32::from_rgb(229, 235, 241),
+        );
+
+        let (accent, accent_fill) = Self::session_status_colors(&session.state);
+        let status_rect = egui::Rect::from_center_size(
+            rect.center_top() + Vec2::new(0.0, 88.0),
+            Vec2::new(220.0, 34.0),
+        );
+        painter.rect_filled(status_rect, CornerRadius::same(17), accent_fill);
+        painter.text(
+            status_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            Self::session_status_label(&session.state),
+            egui::FontId::proportional(15.0),
+            accent,
+        );
+
+        painter.text(
+            rect.center_top() + Vec2::new(0.0, 138.0),
+            egui::Align2::CENTER_CENTER,
+            &session.target_host_name,
+            egui::FontId::proportional(26.0),
+            Color32::from_rgb(245, 248, 252),
+        );
+
+        painter.text(
+            rect.center_top() + Vec2::new(0.0, 172.0),
+            egui::Align2::CENTER_CENTER,
+            if self.session_texture.is_some() {
+                "Тестовый медиапоток активен"
+            } else {
+                "Полотно удалённого экрана готово для медиапотока"
+            },
+            egui::FontId::proportional(15.0),
+            Color32::from_rgb(192, 202, 213),
+        );
+
+        painter.text(
+            rect.center_top() + Vec2::new(0.0, 204.0),
+            egui::Align2::CENTER_CENTER,
+            match session.state.as_str() {
+                "connected" if self.session_texture.is_some() => {
+                    "Host уже передаёт PNG-кадры по media websocket."
+                }
+                "connected" => "Ожидаем первые кадры со стороны Host.",
+                "pending" => "Ожидаем подтверждение со стороны Host.",
+                "demo" => "Работаем в локальном демонстрационном режиме.",
+                "closed" => "Сеанс закрыт.",
+                "rejected" => "Подключение отклонено.",
+                _ => "Ожидаем новое состояние сеанса.",
+            },
+            egui::FontId::proportional(14.0),
+            Color32::from_rgb(170, 181, 193),
+        );
+    }
+
+    fn session_window(&mut self, ctx: &Context) {
+        if !self.show_session_window {
+            return;
+        }
+
+        let Some(session) = self.last_session.clone() else {
+            self.show_session_window = false;
+            return;
+        };
+
+        let mut open = true;
+        egui::Window::new("Окно сеанса")
+            .id(egui::Id::new("session_window"))
+            .open(&mut open)
+            .default_size(Vec2::new(980.0, 640.0))
+            .min_size(Vec2::new(760.0, 520.0))
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.columns(2, |columns| {
+                    columns[0].vertical(|ui| {
+                        self.remote_view_placeholder(ui, &session);
+                    });
+
+                    columns[1].vertical(|ui| {
+                        ui.heading(
+                            RichText::new(&session.target_host_name)
+                                .strong()
+                                .color(Color32::from_rgb(37, 54, 74)),
+                        );
+                        ui.label(
+                            RichText::new(format!("ID хоста: {}", session.target_host_id))
+                                .color(Color32::from_rgb(92, 103, 114)),
+                        );
+                        ui.add_space(8.0);
+
+                        let (status_tint, status_fill) =
+                            Self::session_status_colors(&session.state);
+                        status_chip(
+                            ui,
+                            Self::session_status_label(&session.state),
+                            status_tint,
+                            status_fill,
+                        );
+
+                        ui.add_space(10.0);
+                        Frame::new()
+                            .fill(Color32::from_rgb(243, 246, 249))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(199, 206, 213)))
+                            .corner_radius(CornerRadius::same(6))
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                Grid::new("session_window_grid")
+                                    .num_columns(2)
+                                    .spacing([12.0, 8.0])
+                                    .show(ui, |ui| {
+                                        detail_row(ui, "Сеанс", &session.session_id);
+                                        detail_row(
+                                            ui,
+                                            "Истекает",
+                                            &format_ms(session.expires_at_ms),
+                                        );
+                                        detail_row(
+                                            ui,
+                                            "Канал",
+                                            if self.signal_listener_key.is_some() {
+                                                "signal подключён"
+                                            } else {
+                                                "signal переподключается"
+                                            },
+                                        );
+                                        detail_row(
+                                            ui,
+                                            "Режим",
+                                            if session.state == "demo" {
+                                                "демонстрационный"
+                                            } else {
+                                                "удалённый сеанс"
+                                            },
+                                        );
+                                        detail_row(
+                                            ui,
+                                            "Медиа",
+                                            if self.media_connected_session_id.as_deref()
+                                                == Some(session.session_id.as_str())
+                                            {
+                                                "media подключён"
+                                            } else {
+                                                "ожидаем кадры"
+                                            },
+                                        );
+                                    });
+                            });
+
+                        ui.add_space(12.0);
+                        subpanel(ui, "Этап сеанса", |ui| {
+                            ui.label(
+                                RichText::new(Self::session_stage_note(&session.state))
+                                    .color(Color32::from_rgb(79, 90, 101)),
+                            );
+                        });
+
+                        ui.add_space(10.0);
+                        subpanel(ui, "Следующие шаги", |ui| {
+                            ui.label("1. Подключить тестовый media-канал и вывести первые кадры.");
+                            ui.label("2. Передать в это окно координаты мыши и клавиатурные события.");
+                            ui.label("3. После этого включить реальный screen capture на Host.");
+                        });
+
+                        ui.add_space(14.0);
+                        ui.horizontal_wrapped(|ui| {
+                            let close_enabled =
+                                !matches!(session.state.as_str(), "closed" | "rejected");
+                            if ui
+                                .add_enabled(close_enabled, action_button_widget("Завершить"))
+                                .clicked()
+                            {
+                                self.close_session();
+                            }
+                            if ui.button("Скрыть окно").clicked() {
+                                self.show_session_window = false;
+                            }
+                        });
+                    });
+                });
+            });
+
+        self.show_session_window = open;
     }
 
     fn top_bar(&mut self, ctx: &Context) {
@@ -1126,14 +1559,17 @@ impl ConsoleApp {
 
 impl App for ConsoleApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_secs(2));
+        ctx.request_repaint_after(Duration::from_millis(250));
         self.maybe_auto_sign_in();
         self.ensure_signal_listener();
         self.process_signal_events();
+        self.ensure_media_listener();
+        self.process_media_events(ctx);
         self.ensure_selection_visible();
         self.top_bar(ctx);
         self.left_panel(ctx);
         self.center_panel(ctx);
+        self.session_window(ctx);
         self.footer(ctx);
     }
 }
@@ -1315,10 +1751,13 @@ fn detail_row(ui: &mut Ui, label: &str, value: &str) {
 }
 
 fn action_button(ui: &mut Ui, label: &str) -> egui::Response {
-    ui.add_sized(
-        [104.0, 30.0],
-        Button::new(label).fill(Color32::from_rgb(235, 240, 246)),
-    )
+    ui.add(action_button_widget(label))
+}
+
+fn action_button_widget(label: &str) -> impl egui::Widget {
+    Button::new(label)
+        .min_size(Vec2::new(104.0, 30.0))
+        .fill(Color32::from_rgb(235, 240, 246))
 }
 
 fn subpanel(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {

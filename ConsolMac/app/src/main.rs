@@ -7,6 +7,10 @@ mod api;
 mod app;
 
 #[cfg(target_os = "macos")]
+#[path = "../../../Consol/app/src/media.rs"]
+mod media;
+
+#[cfg(target_os = "macos")]
 #[path = "../../../Consol/app/src/signal.rs"]
 mod signal;
 
