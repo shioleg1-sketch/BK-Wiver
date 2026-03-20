@@ -2,7 +2,7 @@
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "BK-Wiver"
 #define MyAppExeName "bk-wiver-console.exe"
-#define MyAppSource "..\..\..\target\release\bk-wiver-console.exe"
+#define MyAppSource ".\stage\bk-wiver-console.exe"
 #define MyAppIcon "..\..\assets\app-icon.ico"
 
 [Setup]

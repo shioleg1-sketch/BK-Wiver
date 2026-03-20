@@ -6,6 +6,8 @@
 /Host/third_party/ffmpeg/windows-x64/ffmpeg.exe
 /Host/third_party/ffmpeg/windows-x64/ffprobe.exe
 /Host/third_party/ffmpeg/windows-x64/*.dll
+/Host/installer/windows/stage/
+/Consol/installer/windows/stage/
 
 .DS_Store
 

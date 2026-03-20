@@ -2,7 +2,7 @@
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "BK-Wiver"
 #define MyAppExeName "bk-wiver-host.exe"
-#define MyAppSource "..\..\..\target\release\bk-wiver-host.exe"
+#define MyAppSource ".\stage\bk-wiver-host.exe"
 #define MyAppIcon "..\..\assets\app-icon.ico"
 #define MyFfmpegDir "..\..\third_party\ffmpeg\windows-x64"
 #define MyServiceName "BKWiverHostService"
