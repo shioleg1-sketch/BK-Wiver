@@ -853,6 +853,8 @@ impl ConsoleApp {
                     session_id,
                     codec,
                     bytes,
+                    width,
+                    height,
                 } => {
                     if self
                         .last_session
@@ -887,9 +889,23 @@ impl ConsoleApp {
                             self.media_connected_session_id = Some(session_id);
                         }
                         MediaCodec::H264 => {
+                            let (Some(width), Some(height)) = (width, height) else {
+                                continue;
+                            };
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [width as usize, height as usize],
+                                &bytes,
+                            );
+                            if let Some(texture) = &mut self.session_texture {
+                                texture.set(color_image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.session_texture = Some(ctx.load_texture(
+                                    "remote-session-frame",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
                             self.media_connected_session_id = Some(session_id);
-                            self.status_line = "Получен H.264 media packet. Декодер будет следующим шагом."
-                                .to_owned();
                         }
                     }
                 }

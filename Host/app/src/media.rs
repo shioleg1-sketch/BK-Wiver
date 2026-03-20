@@ -1,10 +1,12 @@
 use std::{
     env,
-    io::Cursor,
+    io::{Cursor, Read, Write},
     path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
     },
     thread,
     time::Duration,
@@ -12,9 +14,10 @@ use std::{
 
 use image::{
     ColorType, ImageBuffer, ImageEncoder, Rgba, RgbaImage, codecs::jpeg::JpegEncoder,
-    codecs::png::PngEncoder, imageops::FilterType,
+    imageops::FilterType,
 };
 use screenshots::Screen;
+use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
@@ -30,13 +33,6 @@ pub enum StreamCodec {
 }
 
 impl StreamCodec {
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            Self::Jpeg => "jpeg",
-            Self::H264 => "h264",
-        }
-    }
-
     fn code(self) -> u8 {
         match self {
             Self::Jpeg => 1,
@@ -115,6 +111,123 @@ impl StreamProfile {
             Self::Sharp => Duration::from_millis(230),
         }
     }
+
+    fn target_fps(self) -> u32 {
+        match self {
+            Self::Fast => 24,
+            Self::Balanced => 18,
+            Self::Sharp => 14,
+        }
+    }
+}
+
+struct H264EncoderSession {
+    child: Child,
+    stdin: ChildStdin,
+    packet_rx: Receiver<Vec<u8>>,
+    width: u32,
+    height: u32,
+}
+
+impl H264EncoderSession {
+    fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
+        let ffmpeg = ffmpeg_executable_path();
+        let mut child = Command::new(ffmpeg)
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("-s")
+            .arg(format!("{width}x{height}"))
+            .arg("-r")
+            .arg(profile.target_fps().to_string())
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-an")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-preset")
+            .arg("veryfast")
+            .arg("-tune")
+            .arg("zerolatency")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-g")
+            .arg(profile.target_fps().to_string())
+            .arg("-keyint_min")
+            .arg(profile.target_fps().to_string())
+            .arg("-x264-params")
+            .arg("scenecut=0:repeat-headers=1")
+            .arg("-f")
+            .arg("h264")
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "ffmpeg stdin is not available".to_owned())?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "ffmpeg stdout is not available".to_owned())?;
+        let (packet_tx, packet_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if packet_tx.send(buffer[..read].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            stdin,
+            packet_rx,
+            width,
+            height,
+        })
+    }
+
+    fn push_frame(&mut self, image: &RgbaImage) -> Result<(), String> {
+        self.stdin
+            .write_all(image.as_raw())
+            .map_err(|error| error.to_string())
+    }
+
+    fn drain_packets(&self) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        while let Ok(packet) = self.packet_rx.try_recv() {
+            packets.push(packet);
+        }
+        packets
+    }
+
+    fn matches(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+}
+
+impl Drop for H264EncoderSession {
+    fn drop(&mut self) {
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 pub fn spawn_stream(
@@ -132,16 +245,18 @@ pub fn spawn_stream(
         let mut frame_index = 0_u32;
         let mut active_screen = select_capture_screen();
         let mut previous_signature: Option<Vec<u8>> = None;
+        let mut preferred_codec = StreamCodec::H264;
 
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
+                    let mut h264_encoder: Option<H264EncoderSession> = None;
                     while !stop_flag.load(Ordering::Relaxed) {
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
 
-                        let frame = match active_screen.as_ref() {
-                            Some(screen) => match capture_screen_frame(screen, stream_profile) {
+                        let frame_image = match active_screen.as_ref() {
+                            Some(screen) => match capture_screen_image(screen, stream_profile) {
                                 Ok(frame) => frame,
                                 Err(_) => {
                                     active_screen = select_capture_screen();
@@ -155,17 +270,61 @@ pub fn spawn_stream(
                         };
                         frame_index = frame_index.wrapping_add(1);
 
-                        let signature = frame_signature(&frame);
+                        let signature = frame_signature(frame_image.as_raw());
                         let is_active = previous_signature
                             .as_ref()
                             .map(|previous| signature_distance(previous, &signature) > 18)
                             .unwrap_or(true);
                         previous_signature = Some(signature);
 
-                        let packet =
-                            encode_media_packet(StreamCodec::Jpeg, MediaPacketKind::Frame, &frame);
-                        if socket.send(Message::Binary(packet.into())).is_err() {
-                            break;
+                        let mut sent_frame = false;
+                        if preferred_codec == StreamCodec::H264 {
+                            match ensure_h264_encoder(
+                                &mut h264_encoder,
+                                &mut socket,
+                                frame_image.width(),
+                                frame_image.height(),
+                                stream_profile,
+                            ) {
+                                Ok(()) => {
+                                    if let Some(encoder) = &mut h264_encoder {
+                                        if encoder.push_frame(&frame_image).is_ok() {
+                                            for packet in encoder.drain_packets() {
+                                                let packet = encode_media_packet(
+                                                    StreamCodec::H264,
+                                                    MediaPacketKind::Frame,
+                                                    &packet,
+                                                );
+                                                if socket.send(Message::Binary(packet.into())).is_err()
+                                                {
+                                                    sent_frame = false;
+                                                    break;
+                                                }
+                                                sent_frame = true;
+                                            }
+                                        } else {
+                                            preferred_codec = StreamCodec::Jpeg;
+                                            h264_encoder = None;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    preferred_codec = StreamCodec::Jpeg;
+                                    h264_encoder = None;
+                                }
+                            }
+                        }
+
+                        if !sent_frame {
+                            let Ok(frame) = encode_jpeg(&frame_image, stream_profile.jpeg_quality())
+                            else {
+                                break;
+                            };
+                            let packet =
+                                encode_media_packet(StreamCodec::Jpeg, MediaPacketKind::Frame, &frame);
+                            if socket.send(Message::Binary(packet.into())).is_err() {
+                                break;
+                            }
                         }
 
                         thread::sleep(if is_active {
@@ -194,7 +353,7 @@ fn select_capture_screen() -> Option<Screen> {
         .or_else(|| screens.into_iter().next())
 }
 
-fn capture_screen_frame(screen: &Screen, profile: StreamProfile) -> Result<Vec<u8>, String> {
+fn capture_screen_image(screen: &Screen, profile: StreamProfile) -> Result<RgbaImage, String> {
     let captured = screen.capture().map_err(|error| error.to_string())?;
     let width = captured.width();
     let height = captured.height();
@@ -203,8 +362,7 @@ fn capture_screen_frame(screen: &Screen, profile: StreamProfile) -> Result<Vec<u
     let image = ImageBuffer::from_raw(width, height, raw)
         .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
 
-    let image = fit_frame(image, profile.max_dimensions());
-    encode_jpeg(&image, profile.jpeg_quality())
+    Ok(fit_frame(image, profile.max_dimensions()))
 }
 
 fn fit_frame(image: RgbaImage, max_dimensions: (u32, u32)) -> RgbaImage {
@@ -221,7 +379,7 @@ fn fit_frame(image: RgbaImage, max_dimensions: (u32, u32)) -> RgbaImage {
     image::imageops::resize(&image, resized_width, resized_height, FilterType::Triangle)
 }
 
-fn build_test_frame(frame_index: u32) -> Vec<u8> {
+fn build_test_frame(frame_index: u32) -> RgbaImage {
     let mut image: RgbaImage = ImageBuffer::new(TEST_FRAME_WIDTH, TEST_FRAME_HEIGHT);
     let shift = (frame_index * 13) % TEST_FRAME_WIDTH;
     let pulse = ((frame_index * 17) % 255) as u8;
@@ -242,29 +400,13 @@ fn build_test_frame(frame_index: u32) -> Vec<u8> {
             Rgba([r, g, b, 255])
         };
     }
-
-    encode_png(&image).unwrap_or_default()
+    image
 }
 
 fn encode_jpeg(image: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let mut cursor = Cursor::new(&mut bytes);
     let encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
-    encoder
-        .write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            ColorType::Rgba8.into(),
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(bytes)
-}
-
-fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    let mut cursor = Cursor::new(&mut bytes);
-    let encoder = PngEncoder::new(&mut cursor);
     encoder
         .write_image(
             image.as_raw(),
@@ -320,6 +462,35 @@ pub fn ffmpeg_executable_path() -> PathBuf {
     }
 
     PathBuf::from("ffmpeg")
+}
+
+fn ensure_h264_encoder(
+    encoder: &mut Option<H264EncoderSession>,
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    width: u32,
+    height: u32,
+    profile: StreamProfile,
+) -> Result<(), String> {
+    let needs_restart = encoder
+        .as_ref()
+        .map(|active| !active.matches(width, height))
+        .unwrap_or(true);
+
+    if !needs_restart {
+        return Ok(());
+    }
+
+    *encoder = Some(H264EncoderSession::new(width, height, profile)?);
+    let config = json!({
+        "width": width,
+        "height": height,
+    });
+    let payload = serde_json::to_vec(&config).map_err(|error| error.to_string())?;
+    let packet = encode_media_packet(StreamCodec::H264, MediaPacketKind::Config, &payload);
+    socket
+        .send(Message::Binary(packet.into()))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]) -> Vec<u8> {
