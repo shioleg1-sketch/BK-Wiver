@@ -24,59 +24,71 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
+        id: build_binaries
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release --manifest-path "Host/app/Cargo.toml" --bin bk-wiver-host
-          cargo build --release --manifest-path "Consol/app/Cargo.toml" --bin bk-wiver-console
+
+          function Build-And-ResolveExecutable {
+            param(
+              [string]$ManifestPath,
+              [string]$BinaryName,
+              [string]$Label
+            )
+
+            $lines = & cargo build --release --manifest-path $ManifestPath --bin $BinaryName --message-format=json-render-diagnostics 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $lines | ForEach-Object { Write-Host $_ }
+              throw "cargo build failed for $Label"
+            }
+
+            $lines | ForEach-Object { Write-Host $_ }
+
+            $resolved = $null
+            foreach ($line in $lines) {
+              if (-not ($line -is [string]) -or -not $line.StartsWith("{")) {
+                continue
+              }
+              try {
+                $message = $line | ConvertFrom-Json
+              } catch {
+                continue
+              }
+              if ($message.reason -eq "compiler-artifact" -and $message.executable) {
+                $resolved = $message.executable
+              }
+            }
+
+            if (-not $resolved) {
+              Write-Host "cargo did not report an executable for $Label"
+              Get-ChildItem -Path $PWD -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+                Select-Object FullName, Length, LastWriteTime |
+                Format-Table -AutoSize
+              throw "No executable path resolved for $Label"
+            }
+
+            return $resolved
+          }
+
+          $hostExe = Build-And-ResolveExecutable -ManifestPath "Host/app/Cargo.toml" -BinaryName "bk-wiver-host" -Label "host"
+          $consoleExe = Build-And-ResolveExecutable -ManifestPath "Consol/app/Cargo.toml" -BinaryName "bk-wiver-console" -Label "console"
+
+          "host_exe=$hostExe" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "console_exe=$consoleExe" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Prepare installer staging
         shell: pwsh
         run: |
-          function Resolve-BinaryPath {
-            param(
-              [string[]]$Candidates,
-              [string]$Label
-            )
-
-            foreach ($candidate in $Candidates) {
-              if (Test-Path $candidate) {
-                return (Resolve-Path $candidate).Path
-              }
-            }
-
-            $names = $Candidates | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -Unique
-            foreach ($name in $names) {
-              $found = Get-ChildItem -Path $PWD -Recurse -File -Filter $name -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-              if ($found) {
-                return $found.FullName
-              }
-            }
-
-            Write-Host "Expected $Label binary not found. Known candidate paths:"
-            $Candidates | ForEach-Object { Write-Host " - $_" }
-            Write-Host "Discovered executables under workspace:"
-            Get-ChildItem -Path $PWD -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length, LastWriteTime |
-              Format-Table -AutoSize
-            throw "$Label binary not found in expected locations"
-          }
-
           New-Item -ItemType Directory -Force -Path "Host\installer\windows\stage" | Out-Null
           New-Item -ItemType Directory -Force -Path "Consol\installer\windows\stage" | Out-Null
-          $hostExe = Resolve-BinaryPath -Label "host" -Candidates @(
-            (Join-Path $PWD "target\release\bk-wiver-host.exe"),
-            (Join-Path $PWD "target\release\bk_wiver_host.exe"),
-            (Join-Path $PWD "Host\app\target\release\bk-wiver-host.exe"),
-            (Join-Path $PWD "Host\app\target\release\bk_wiver_host.exe")
-          )
-          $consoleExe = Resolve-BinaryPath -Label "console" -Candidates @(
-            (Join-Path $PWD "target\release\bk-wiver-console.exe"),
-            (Join-Path $PWD "target\release\bk_wiver_console.exe"),
-            (Join-Path $PWD "Consol\app\target\release\bk-wiver-console.exe"),
-            (Join-Path $PWD "Consol\app\target\release\bk_wiver_console.exe")
-          )
+          $hostExe = "${{ steps.build_binaries.outputs.host_exe }}"
+          $consoleExe = "${{ steps.build_binaries.outputs.console_exe }}"
+          if (-not (Test-Path $hostExe)) {
+            throw "Resolved host binary path does not exist: $hostExe"
+          }
+          if (-not (Test-Path $consoleExe)) {
+            throw "Resolved console binary path does not exist: $consoleExe"
+          }
           Copy-Item -Force $hostExe "Host\installer\windows\stage\bk-wiver-host.exe"
           Copy-Item -Force $consoleExe "Consol\installer\windows\stage\bk-wiver-console.exe"
 
