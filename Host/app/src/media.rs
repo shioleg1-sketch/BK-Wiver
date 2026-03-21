@@ -440,6 +440,10 @@ impl H264EncoderSession {
     fn flavor(&self) -> H264EncoderFlavor {
         self.flavor
     }
+
+    fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
 }
 
 impl Drop for H264EncoderSession {
@@ -476,6 +480,7 @@ pub fn spawn_stream(
                 Ok((mut socket, _)) => {
                     let mut h264_encoder: Option<H264EncoderSession> = None;
                     let mut h264_disabled_flavors: Vec<H264EncoderFlavor> = Vec::new();
+                    let mut h264_config_sent = false;
                     h264_no_output_streak = 0;
                     while !stop_flag.load(Ordering::Relaxed) {
                         stream_tick = stream_tick.saturating_add(1);
@@ -520,7 +525,6 @@ pub fn spawn_stream(
                             match ensure_h264_encoder(
                                 &mut h264_encoder,
                                 &h264_disabled_flavors,
-                                &mut socket,
                                 frame_image.width(),
                                 frame_image.height(),
                                 stream_profile,
@@ -545,12 +549,48 @@ pub fn spawn_stream(
                                                     h264_disabled_flavors
                                                         .push(encoder.flavor());
                                                     h264_encoder = None;
+                                                    h264_config_sent = false;
                                                     h264_restart_allowed_at_tick =
                                                         stream_tick.saturating_add(24);
                                                     h264_no_output_streak = 0;
                                                 }
                                             } else {
                                                 h264_no_output_streak = 0;
+                                                if !h264_config_sent {
+                                                    let (width, height) = encoder.dimensions();
+                                                    logging::append_log(
+                                                        "INFO",
+                                                        "media.h264_encoder",
+                                                        format!(
+                                                            "config sent encoder={} width={} height={}",
+                                                            encoder.flavor().label(),
+                                                            width,
+                                                            height
+                                                        ),
+                                                    );
+                                                    let config = json!({
+                                                        "width": width,
+                                                        "height": height,
+                                                    });
+                                                    let payload = serde_json::to_vec(&config)
+                                                        .map_err(|error| error.to_string())
+                                                        .unwrap_or_default();
+                                                    if payload.is_empty() {
+                                                        break;
+                                                    }
+                                                    let packet = encode_media_packet(
+                                                        StreamCodec::H264,
+                                                        MediaPacketKind::Config,
+                                                        &payload,
+                                                    );
+                                                    if socket
+                                                        .send(Message::Binary(packet.into()))
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                    h264_config_sent = true;
+                                                }
                                             }
                                             for packet in packets {
                                                 let packet = encode_media_packet(
@@ -590,6 +630,7 @@ pub fn spawn_stream(
                                             );
                                             h264_disabled_flavors.push(encoder.flavor());
                                             h264_encoder = None;
+                                            h264_config_sent = false;
                                             h264_restart_allowed_at_tick =
                                                 stream_tick.saturating_add(24);
                                             h264_no_output_streak = 0;
@@ -606,6 +647,7 @@ pub fn spawn_stream(
                                         ),
                                     );
                                     h264_encoder = None;
+                                    h264_config_sent = false;
                                     h264_restart_allowed_at_tick =
                                         stream_tick.saturating_add(24);
                                     h264_no_output_streak = 0;
@@ -711,7 +753,6 @@ pub fn ffmpeg_executable_path() -> PathBuf {
 fn ensure_h264_encoder(
     encoder: &mut Option<H264EncoderSession>,
     disabled_flavors: &[H264EncoderFlavor],
-    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     width: u32,
     height: u32,
     profile: StreamProfile,
@@ -733,27 +774,6 @@ fn ensure_h264_encoder(
         match H264EncoderSession::new(width, height, profile, flavor) {
             Ok(session) => {
                 *encoder = Some(session);
-                logging::append_log(
-                    "INFO",
-                    "media.h264_encoder",
-                    format!(
-                        "config sent encoder={} width={} height={}",
-                        flavor.label(),
-                        width,
-                        height
-                    ),
-                );
-                let config = json!({
-                    "width": width,
-                    "height": height,
-                });
-                let payload =
-                    serde_json::to_vec(&config).map_err(|error| error.to_string())?;
-                let packet =
-                    encode_media_packet(StreamCodec::H264, MediaPacketKind::Config, &payload);
-                socket
-                    .send(Message::Binary(packet.into()))
-                    .map_err(|error| error.to_string())?;
                 return Ok(());
             }
             Err(error) => {
