@@ -90,6 +90,8 @@ git push origin v0.1.12
 
 - `BK-Host-Setup.exe`
 - `BK-Console-Setup.exe`
+- `BK-Host-portable.zip` с `bk-wiver-host.exe` и `ffmpeg.exe`
+- `BK-Console-portable.zip` с `bk-wiver-console.exe` и `ffmpeg.exe`
 - `BK-Console macOS.dmg`
 
 ### FFmpeg для Windows Host
@@ -105,6 +107,7 @@ git push origin v0.1.12
 pwsh -File .\scripts\fetch_ffmpeg_windows.ps1
 cargo build --release -p bk-wiver-host
 cargo build --release -p bk-wiver-console
+pwsh -File .\scripts\prepare_windows_bundle.ps1 -HostExe .\target\release\bk-wiver-host.exe -ConsoleExe .\target\release\bk-wiver-console.exe
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Host\installer\windows\BK-Wiver-Host.iss"
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Consol\installer\windows\BK-Wiver-Consol.iss"
 ```

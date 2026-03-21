@@ -80,24 +80,10 @@ jobs:
       - name: Prepare installer staging
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "Host\installer\windows\stage" | Out-Null
-          New-Item -ItemType Directory -Force -Path "Consol\installer\windows\stage" | Out-Null
           $hostExe = "${{ steps.build_binaries.outputs.host_exe }}"
           $consoleExe = "${{ steps.build_binaries.outputs.console_exe }}"
-          if (-not (Test-Path $hostExe)) {
-            throw "Resolved host binary path does not exist: $hostExe"
-          }
-          if (-not (Test-Path $consoleExe)) {
-            throw "Resolved console binary path does not exist: $consoleExe"
-          }
           $ffmpegExe = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-          if (-not (Test-Path $ffmpegExe)) {
-            throw "Resolved ffmpeg path does not exist: $ffmpegExe"
-          }
-          Copy-Item -Force $hostExe "Host\installer\windows\stage\bk-wiver-host.exe"
-          Copy-Item -Force $consoleExe "Consol\installer\windows\stage\bk-wiver-console.exe"
-          Copy-Item -Force $ffmpegExe "Host\installer\windows\stage\ffmpeg.exe"
-          Copy-Item -Force $ffmpegExe "Consol\installer\windows\stage\ffmpeg.exe"
+          & .\scripts\prepare_windows_bundle.ps1 -HostExe $hostExe -ConsoleExe $consoleExe -FfmpegExe $ffmpegExe
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -110,6 +96,12 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Consol\installer\windows\BK-Wiver-Consol.iss"
 
+      - name: Pack portable bundles
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\windows\host\*" -DestinationPath "dist\BK-Host-portable.zip" -Force
+          Compress-Archive -Path "dist\windows\console\*" -DestinationPath "dist\BK-Console-portable.zip" -Force
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
@@ -117,4 +109,13 @@ jobs:
           path: |
             dist/BK-Host-Setup.exe
             dist/BK-Console-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload portable bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: bk-wiver-windows-portable
+          path: |
+            dist/BK-Host-portable.zip
+            dist/BK-Console-portable.zip
           if-no-files-found: error
