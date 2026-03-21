@@ -34,6 +34,81 @@ just up
 - PostgreSQL доступен на `127.0.0.1:5432`
 - Server healthcheck доступен на `http://127.0.0.1:8080/healthz`
 
+## Текущий workflow разработки и сборки
+
+Практический рабочий процесс для текущего состояния проекта:
+
+- разработка и локальная проверка идут на `macOS`;
+- локально на `macOS` собирается `BK-Console macOS`;
+- `Windows` installer'ы собираются через `GitHub Actions`;
+- серверная часть и общая логика проверяются через `cargo check`.
+
+### Локальная разработка на macOS
+
+Быстрая проверка workspace:
+
+```bash
+cargo check -p bk-wiver-host
+cargo check -p bk-wiver-console
+cargo check -p bk-wiver-console-macos
+```
+
+Локальная сборка `BK-Console macOS`:
+
+```bash
+cargo build --release -p bk-wiver-console-macos
+./ConsolMac/installer/macos/build_console_macos.sh
+```
+
+Готовые артефакты появляются в:
+
+- `ConsolMac/dist/BK-Console macOS.app`
+- `ConsolMac/dist/BK-Console macOS.dmg`
+
+### Сборка Windows installer'ов
+
+Локально на `macOS` `Inno Setup` не используется. Для `Windows` инсталляторов основной путь такой:
+
+1. сделать `git push` в `main`;
+2. дождаться `Windows Build` в `GitHub Actions`;
+3. если нужен официальный выпуск, создать тег `v*`.
+
+Обычная сборка:
+
+```bash
+git push
+```
+
+Релизная сборка:
+
+```bash
+git tag v0.1.12
+git push origin v0.1.12
+```
+
+После этого в `GitHub Actions` и `Releases` собираются:
+
+- `BK-Host-Setup.exe`
+- `BK-Console-Setup.exe`
+- `BK-Console macOS.dmg`
+
+### FFmpeg для Windows Host
+
+`FFmpeg` больше не хранится в Git как бинарник. Он подтягивается автоматически:
+
+- локально на `Windows` через `scripts/fetch_ffmpeg_windows.ps1`;
+- в `GitHub Actions` перед сборкой `BK-Host-Setup.exe`.
+
+Если нужно собрать `Windows` installer вручную на `Windows`, из корня проекта:
+
+```powershell
+pwsh -File .\scripts\fetch_ffmpeg_windows.ps1
+cargo build --release -p bk-wiver-host
+cargo build --release -p bk-wiver-console
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Host\installer\windows\BK-Wiver-Host.iss"
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "Consol\installer\windows\BK-Wiver-Consol.iss"
+```
+
 Целевые компоненты:
 
 - `Desktop` для установки на `Windows` и `macOS`;
