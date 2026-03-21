@@ -57,6 +57,7 @@ struct H264DecoderSession {
     stdin: ChildStdin,
     flavor: H264DecoderFlavor,
     exit_rx: Receiver<()>,
+    packet_write_count: u64,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -263,6 +264,7 @@ impl H264DecoderSession {
             stdin,
             flavor,
             exit_rx,
+            packet_write_count: 0,
         })
     }
 
@@ -270,7 +272,28 @@ impl H264DecoderSession {
         if self.exit_rx.try_recv().is_ok() {
             return Err(format!("decoder {} exited", self.flavor.label()));
         }
-        self.stdin.write_all(bytes).map_err(|error| error.to_string())
+        if let Some(status) = self.child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!(
+                "decoder {} exited early with status {}",
+                self.flavor.label(),
+                status
+            ));
+        }
+        self.stdin.write_all(bytes).map_err(|error| error.to_string())?;
+        self.packet_write_count = self.packet_write_count.saturating_add(1);
+        if self.packet_write_count <= 5 || self.packet_write_count % 120 == 0 {
+            logging::append_log(
+                "INFO",
+                "media.h264_decoder",
+                format!(
+                    "packet written decoder={} bytes={} count={}",
+                    self.flavor.label(),
+                    bytes.len(),
+                    self.packet_write_count
+                ),
+            );
+        }
+        Ok(())
     }
 
     fn flavor(&self) -> H264DecoderFlavor {
@@ -363,7 +386,8 @@ pub fn spawn_listener(
                                         }
                                         (MediaCodec::H264, MediaPacketKind::Frame) => {
                                             h264_packet_count = h264_packet_count.saturating_add(1);
-                                            if h264_packet_count == 1 || h264_packet_count % 120 == 0
+                                            if h264_packet_count <= 5
+                                                || h264_packet_count % 120 == 0
                                             {
                                                 logging::append_log(
                                                     "INFO",
