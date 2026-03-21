@@ -1,10 +1,11 @@
-use std::{mem::MaybeUninit, ptr::copy_nonoverlapping};
+use std::{mem::ManuallyDrop, ptr::copy_nonoverlapping};
 
 use image::RgbaImage;
 use windows::{
+    core::{Error, Interface, VARIANT},
     Win32::{
         Media::MediaFoundation::{
-            CLSID_CMSH264EncoderMFT, CODECAPI_AVEncCommonLowLatency,
+            CLSID_MSH264EncoderMFT, CODECAPI_AVEncCommonLowLatency,
             CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
             CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncVideoMaxKeyframeDistance,
             CODECAPI_AVLowLatencyMode, CODECAPI_AVRealtimeControl, IMFMediaBuffer,
@@ -12,16 +13,15 @@ use windows::{
             MF_E_TRANSFORM_NEED_MORE_INPUT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
             MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER,
             MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
-            MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFSetAttributeRatio,
-            MFSetAttributeSize, MFShutdown, MFStartup, MFVideoFormat_H264, MFVideoFormat_NV12,
-            MFVideoInterlace_Progressive, MFT_MESSAGE_COMMAND_FLUSH,
-            MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-            MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
+            MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup,
+            MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+            MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+            MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
             eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_ConstrainedBase,
         },
         System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize},
     },
-    core::{Error, Result, VARIANT},
 };
 
 use super::StreamProfile;
@@ -41,12 +41,14 @@ pub struct H264EncoderSession {
     prepend_sequence_header: bool,
 }
 
+type WinResult<T> = windows::core::Result<T>;
+
 impl H264EncoderSession {
-    pub fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
+    pub fn new(width: u32, height: u32, profile: StreamProfile) -> std::result::Result<Self, String> {
         let com_guard = ComGuard::new().map_err(|error| error.to_string())?;
         let mf_guard = MfGuard::new().map_err(|error| error.to_string())?;
         let transform: IMFTransform = unsafe {
-            CoCreateInstance(&CLSID_CMSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
+            CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
         }
         .map_err(|error| error.to_string())?;
 
@@ -54,27 +56,16 @@ impl H264EncoderSession {
         configure_output_type(&transform, width, height, profile).map_err(|error| error.to_string())?;
         configure_input_type(&transform, width, height, profile).map_err(|error| error.to_string())?;
         unsafe {
-            transform
-                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
-                .ok()
+            transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
                 .map_err(|error| error.to_string())?;
-            transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                .ok()
+            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
                 .map_err(|error| error.to_string())?;
-            transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                .ok()
+            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
                 .map_err(|error| error.to_string())?;
         }
 
-        let mut output_stream_info = MFT_OUTPUT_STREAM_INFO::default();
-        unsafe {
-            transform
-                .GetOutputStreamInfo(0, &mut output_stream_info)
-                .ok()
-                .map_err(|error| error.to_string())?;
-        }
+        let output_stream_info = unsafe { transform.GetOutputStreamInfo(0) }
+            .map_err(|error| error.to_string())?;
 
         let (nal_length_size, sequence_header_annex_b) =
             read_sequence_header(&transform).map_err(|error| error.to_string())?;
@@ -95,7 +86,7 @@ impl H264EncoderSession {
         })
     }
 
-    pub fn push_frame(&mut self, image: &RgbaImage) -> Result<(), String> {
+    pub fn push_frame(&mut self, image: &RgbaImage) -> std::result::Result<(), String> {
         let nv12 = rgba_to_nv12(image);
         let sample = create_input_sample(
             &nv12,
@@ -132,14 +123,14 @@ impl H264EncoderSession {
         (self.width, self.height)
     }
 
-    fn drain_output(&mut self) -> Result<()> {
+    fn drain_output(&mut self) -> WinResult<()> {
         loop {
             let sample = create_output_sample(self.output_stream_info.cbSize.max(4096))?;
             let mut output = MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
-                pSample: Some(sample.clone()),
+                pSample: ManuallyDrop::new(Some(sample.clone())),
                 dwStatus: 0,
-                pEvents: None,
+                pEvents: ManuallyDrop::new(None),
             };
             let mut status = 0;
             let result = unsafe { self.transform.ProcessOutput(0, &mut [output], &mut status) };
@@ -190,8 +181,8 @@ impl Drop for H264EncoderSession {
 struct ComGuard;
 
 impl ComGuard {
-    fn new() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
+    fn new() -> WinResult<Self> {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }?;
         Ok(Self)
     }
 }
@@ -205,8 +196,8 @@ impl Drop for ComGuard {
 struct MfGuard;
 
 impl MfGuard {
-    fn new() -> Result<Self> {
-        unsafe { MFStartup(MF_VERSION, 0) }.ok()?;
+    fn new() -> WinResult<Self> {
+        unsafe { MFStartup(MF_VERSION, 0) }?;
         Ok(Self)
     }
 }
@@ -222,28 +213,24 @@ fn configure_output_type(
     width: u32,
     height: u32,
     profile: StreamProfile,
-) -> Result<()> {
+) -> WinResult<()> {
+    // Configure a broadly compatible baseline software H.264 output.
     let media_type: IMFMediaType = unsafe { MFCreateMediaType()? };
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &windows::Win32::Media::MediaFoundation::MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-        media_type.SetUINT32(&MF_MT_AVG_BITRATE, parse_bitrate(profile.target_maxrate()))?;
+        media_type.SetUINT32(&MF_MT_AVG_BITRATE, parse_bitrate(profile.target_maxrate())?)?;
         media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_ConstrainedBase.0 as u32)?;
-        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0)?;
-        MFSetAttributeSize(&media_type, &MF_MT_FRAME_SIZE, width, height)?;
-        MFSetAttributeRatio(
-            &media_type,
-            &MF_MT_FRAME_RATE,
-            profile.target_fps(),
-            1,
-        )?;
-        MFSetAttributeRatio(&media_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(width, height))?;
+        media_type.SetUINT64(&MF_MT_FRAME_RATE, pack_u32_pair(profile.target_fps(), 1))?;
+        media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
         transform.SetOutputType(0, &media_type, 0)?;
     }
     Ok(())
 }
 
-fn apply_software_compat_settings(transform: &IMFTransform, profile: StreamProfile) -> Result<()> {
+fn apply_software_compat_settings(transform: &IMFTransform, profile: StreamProfile) -> WinResult<()> {
     let codec_api: ICodecAPI = transform.cast()?;
     unsafe {
         let _ = codec_api.SetAllDefaults();
@@ -275,7 +262,7 @@ fn apply_software_compat_settings(transform: &IMFTransform, profile: StreamProfi
 }
 
 unsafe fn set_codec_value(codec_api: &ICodecAPI, key: &windows::core::GUID, value: VARIANT) {
-    let _ = codec_api.SetValue(key, value.as_raw());
+    let _ = codec_api.SetValue(key, &value as *const _);
 }
 
 fn configure_input_type(
@@ -283,26 +270,21 @@ fn configure_input_type(
     width: u32,
     height: u32,
     profile: StreamProfile,
-) -> Result<()> {
+) -> WinResult<()> {
     let media_type: IMFMediaType = unsafe { MFCreateMediaType()? };
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &windows::Win32::Media::MediaFoundation::MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0)?;
-        MFSetAttributeSize(&media_type, &MF_MT_FRAME_SIZE, width, height)?;
-        MFSetAttributeRatio(
-            &media_type,
-            &MF_MT_FRAME_RATE,
-            profile.target_fps(),
-            1,
-        )?;
-        MFSetAttributeRatio(&media_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(width, height))?;
+        media_type.SetUINT64(&MF_MT_FRAME_RATE, pack_u32_pair(profile.target_fps(), 1))?;
+        media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
         transform.SetInputType(0, &media_type, 0)?;
     }
     Ok(())
 }
 
-fn create_input_sample(bytes: &[u8], sample_time: i64, sample_duration: i64) -> Result<IMFSample> {
+fn create_input_sample(bytes: &[u8], sample_time: i64, sample_duration: i64) -> WinResult<IMFSample> {
     let sample = unsafe { MFCreateSample()? };
     let buffer = unsafe { MFCreateMemoryBuffer(bytes.len() as u32)? };
     write_buffer(&buffer, bytes)?;
@@ -314,7 +296,7 @@ fn create_input_sample(bytes: &[u8], sample_time: i64, sample_duration: i64) -> 
     Ok(sample)
 }
 
-fn create_output_sample(capacity: u32) -> Result<IMFSample> {
+fn create_output_sample(capacity: u32) -> WinResult<IMFSample> {
     let sample = unsafe { MFCreateSample()? };
     let buffer = unsafe { MFCreateMemoryBuffer(capacity)? };
     unsafe {
@@ -323,17 +305,17 @@ fn create_output_sample(capacity: u32) -> Result<IMFSample> {
     Ok(sample)
 }
 
-fn contiguous_sample_bytes(sample: &IMFSample) -> Result<Vec<u8>> {
+fn contiguous_sample_bytes(sample: &IMFSample) -> WinResult<Vec<u8>> {
     let buffer: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer()? };
     read_buffer(&buffer)
 }
 
-fn write_buffer(buffer: &IMFMediaBuffer, bytes: &[u8]) -> Result<()> {
+fn write_buffer(buffer: &IMFMediaBuffer, bytes: &[u8]) -> WinResult<()> {
     unsafe {
         let mut ptr = std::ptr::null_mut();
         let mut max_len = 0;
         let mut cur_len = 0;
-        buffer.Lock(&mut ptr, &mut max_len, &mut cur_len)?;
+        buffer.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
         if max_len < bytes.len() as u32 {
             buffer.Unlock()?;
             return Err(Error::from_win32());
@@ -345,12 +327,12 @@ fn write_buffer(buffer: &IMFMediaBuffer, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn read_buffer(buffer: &IMFMediaBuffer) -> Result<Vec<u8>> {
+fn read_buffer(buffer: &IMFMediaBuffer) -> WinResult<Vec<u8>> {
     unsafe {
         let mut ptr = std::ptr::null_mut();
         let mut max_len = 0;
         let mut cur_len = 0;
-        buffer.Lock(&mut ptr, &mut max_len, &mut cur_len)?;
+        buffer.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
         let mut bytes = vec![0_u8; cur_len as usize];
         copy_nonoverlapping(ptr, bytes.as_mut_ptr(), cur_len as usize);
         buffer.Unlock()?;
@@ -358,12 +340,9 @@ fn read_buffer(buffer: &IMFMediaBuffer) -> Result<Vec<u8>> {
     }
 }
 
-fn read_sequence_header(transform: &IMFTransform) -> Result<(usize, Vec<u8>)> {
+fn read_sequence_header(transform: &IMFTransform) -> WinResult<(usize, Vec<u8>)> {
     let output_type = unsafe { transform.GetOutputCurrentType(0)? };
-    let mut blob_size = 0;
-    unsafe {
-        output_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob_size)?;
-    }
+    let blob_size = unsafe { output_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER)? };
     if blob_size == 0 {
         return Ok((4, Vec::new()));
     }
@@ -372,8 +351,7 @@ fn read_sequence_header(transform: &IMFTransform) -> Result<(usize, Vec<u8>)> {
     unsafe {
         output_type.GetBlob(
             &MF_MT_MPEG_SEQUENCE_HEADER,
-            blob.as_mut_ptr(),
-            blob.len() as u32,
+            blob.as_mut_slice(),
             Some(&mut written),
         )?;
     }
@@ -473,10 +451,14 @@ fn contains_idr(bytes: &[u8]) -> bool {
     false
 }
 
-fn parse_bitrate(value: &str) -> Result<u32> {
+fn parse_bitrate(value: &str) -> WinResult<u32> {
     let trimmed = value.trim_end_matches('k');
     let kbps = trimmed.parse::<u32>().map_err(|_| Error::from_win32())?;
     Ok(kbps.saturating_mul(1000))
+}
+
+fn pack_u32_pair(high: u32, low: u32) -> u64 {
+    (u64::from(high) << 32) | u64::from(low)
 }
 
 fn rgba_to_nv12(image: &RgbaImage) -> Vec<u8> {

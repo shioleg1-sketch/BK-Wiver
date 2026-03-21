@@ -1,9 +1,9 @@
 use std::{
-    io::{Cursor, Read, Write},
+    io::{Cursor, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
+        mpsc::{self},
     },
     thread,
     time::{Duration, Instant},
@@ -12,8 +12,10 @@ use std::{
 #[cfg(not(windows))]
 use std::{
     env,
+    io::Read,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
+    sync::mpsc::Receiver,
 };
 
 use image::{ColorType, ImageEncoder, RgbaImage, codecs::jpeg::JpegEncoder};
@@ -836,6 +838,7 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
     .map_err(|error| error.to_string())
 }
 
+#[cfg(not(windows))]
 pub fn ffmpeg_executable_path() -> PathBuf {
     if let Ok(current_exe) = env::current_exe()
         && let Some(parent) = current_exe.parent()
@@ -912,10 +915,11 @@ fn ensure_h264_encoder(
             *encoder = Some(session);
             Ok(())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.to_string()),
     }
 }
 
+#[cfg(not(windows))]
 fn configure_hidden_process(_command: &mut Command) {
     #[cfg(windows)]
     {
