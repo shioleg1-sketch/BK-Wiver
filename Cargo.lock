@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "bk-wiver-console"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "crossbeam-channel",
  "eframe",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "bk-wiver-console-macos"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "crossbeam-channel",
  "eframe",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "bk-wiver-host"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "crossbeam-channel",
  "dxgi-capture-rs",
