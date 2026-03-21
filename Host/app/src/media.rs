@@ -1,9 +1,8 @@
 use std::{
-    io::{Cursor, Write},
+    io::Cursor,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self},
     },
     thread,
     time::{Duration, Instant},
@@ -12,10 +11,10 @@ use std::{
 #[cfg(not(windows))]
 use std::{
     env,
-    io::Read,
+    io::{Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::Receiver,
+    sync::mpsc::{self, Receiver},
 };
 
 use image::{ColorType, ImageEncoder, RgbaImage, codecs::jpeg::JpegEncoder};
@@ -26,9 +25,6 @@ use url::Url;
 use crate::{capture::CaptureEngine, logging};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
 mod windows_encoder;
 #[cfg(windows)]
 use windows_encoder::H264EncoderSession;
@@ -36,8 +32,6 @@ use windows_encoder::H264EncoderSession;
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
 const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {

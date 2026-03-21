@@ -126,7 +126,7 @@ impl H264EncoderSession {
     fn drain_output(&mut self) -> WinResult<()> {
         loop {
             let sample = create_output_sample(self.output_stream_info.cbSize.max(4096))?;
-            let mut output = MFT_OUTPUT_DATA_BUFFER {
+            let output = MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
                 pSample: ManuallyDrop::new(Some(sample.clone())),
                 dwStatus: 0,
@@ -182,7 +182,7 @@ struct ComGuard;
 
 impl ComGuard {
     fn new() -> WinResult<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }?;
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
         Ok(Self)
     }
 }
@@ -262,7 +262,7 @@ fn apply_software_compat_settings(transform: &IMFTransform, profile: StreamProfi
 }
 
 unsafe fn set_codec_value(codec_api: &ICodecAPI, key: &windows::core::GUID, value: VARIANT) {
-    let _ = codec_api.SetValue(key, &value as *const _);
+    let _ = unsafe { codec_api.SetValue(key, &value as *const _) };
 }
 
 fn configure_input_type(
