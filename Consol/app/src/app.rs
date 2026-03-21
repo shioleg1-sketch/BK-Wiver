@@ -809,6 +809,9 @@ impl ConsoleApp {
                     body.session_id, host.name
                 );
                 self.add_activity(format!("Создан сеанс для {}", host.name));
+                if let Some(session) = self.last_session.clone() {
+                    self.sync_stream_profile(&session);
+                }
             }
             Err(error) => {
                 logging::append_log("ERROR", "session.create", &error);

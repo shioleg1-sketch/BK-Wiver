@@ -67,17 +67,32 @@ fn capture_screen_image(screen: &Screen, max_dimensions: (u32, u32)) -> Result<R
 }
 
 pub(crate) fn fit_frame(image: RgbaImage, max_dimensions: (u32, u32)) -> RgbaImage {
-    let width = image.width();
-    let height = image.height();
-    if width <= max_dimensions.0 && height <= max_dimensions.1 {
+    if max_dimensions.0 == 0 || max_dimensions.1 == 0 {
         return image;
     }
 
+    let width = image.width();
+    let height = image.height();
     let scale = (max_dimensions.0 as f32 / width as f32)
         .min(max_dimensions.1 as f32 / height as f32);
     let resized_width = ((width as f32 * scale).round() as u32).max(1);
     let resized_height = ((height as f32 * scale).round() as u32).max(1);
-    image::imageops::resize(&image, resized_width, resized_height, FilterType::Triangle)
+    let resized = if resized_width == width && resized_height == height {
+        image
+    } else {
+        image::imageops::resize(&image, resized_width, resized_height, FilterType::Triangle)
+    };
+
+    if resized_width == max_dimensions.0 && resized_height == max_dimensions.1 {
+        return resized;
+    }
+
+    let mut canvas: RgbaImage =
+        ImageBuffer::from_pixel(max_dimensions.0, max_dimensions.1, Rgba([12, 14, 18, 255]));
+    let offset_x = (max_dimensions.0.saturating_sub(resized_width)) / 2;
+    let offset_y = (max_dimensions.1.saturating_sub(resized_height)) / 2;
+    image::imageops::overlay(&mut canvas, &resized, i64::from(offset_x), i64::from(offset_y));
+    canvas
 }
 
 fn build_test_frame(frame_index: u32) -> RgbaImage {
