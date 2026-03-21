@@ -3,7 +3,7 @@
 #define MyAppPublisher "BK-Wiver"
 #define MyAppExeName "bk-wiver-console.exe"
 #define MyAppSource ".\stage\bk-wiver-console.exe"
-#define MyFfmpegSource "..\..\..\Host\third_party\ffmpeg\windows-x64\ffmpeg.exe"
+#define MyFfmpegSource ".\stage\ffmpeg.exe"
 #define MyAppIcon "..\..\assets\app-icon.ico"
 
 [Setup]
