@@ -441,8 +441,8 @@ impl ConsoleApp {
             media_changed_frame_count: 0,
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
-            stream_quality_profile: StreamQualityProfile::Balanced,
-            stream_codec_preference: StreamCodecPreference::Auto,
+            stream_quality_profile: StreamQualityProfile::Fast,
+            stream_codec_preference: StreamCodecPreference::H264,
             remote_input_captured: false,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
@@ -752,8 +752,8 @@ impl ConsoleApp {
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
-        self.stream_quality_profile = StreamQualityProfile::Balanced;
-        self.stream_codec_preference = StreamCodecPreference::Auto;
+        self.stream_quality_profile = StreamQualityProfile::Fast;
+        self.stream_codec_preference = StreamCodecPreference::H264;
         self.remote_input_captured = false;
 
         if self.using_demo_data || !self.signed_in() {
