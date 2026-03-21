@@ -12,23 +12,57 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
+function Resolve-RealFfmpegCandidate {
+    param(
+        [string]$CandidatePath
+    )
+
+    if (-not $CandidatePath -or -not (Test-Path $CandidatePath)) {
+        return $null
+    }
+
+    $resolved = (Resolve-Path $CandidatePath).Path
+    $item = Get-Item $resolved
+
+    if ($item.Length -ge 5MB) {
+        return $resolved
+    }
+
+    $normalized = $resolved.ToLowerInvariant().Replace("/", "\")
+    if ($normalized -match "\\chocolatey\\bin\\ffmpeg\.exe$") {
+        $chocoRoot = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { "C:\ProgramData\chocolatey" }
+        $libRoot = Join-Path $chocoRoot "lib"
+        if (Test-Path $libRoot) {
+            $packageBinary = Get-ChildItem -Path $libRoot -Filter "ffmpeg.exe" -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName.ToLowerInvariant().Replace("/", "\") -notmatch "\\chocolatey\\bin\\" } |
+                Sort-Object Length -Descending |
+                Select-Object -First 1
+            if ($packageBinary) {
+                return $packageBinary.FullName
+            }
+        }
+    }
+
+    return $resolved
+}
+
 function Resolve-FfmpegExe {
     param(
         [string]$PreferredPath
     )
 
     if ($PreferredPath -and (Test-Path $PreferredPath)) {
-        return (Resolve-Path $PreferredPath).Path
+        return (Resolve-RealFfmpegCandidate -CandidatePath $PreferredPath)
     }
 
     $bundledPath = Join-Path $repoRoot "Host\third_party\ffmpeg\windows-x64\ffmpeg.exe"
     if (Test-Path $bundledPath) {
-        return (Resolve-Path $bundledPath).Path
+        return (Resolve-RealFfmpegCandidate -CandidatePath $bundledPath)
     }
 
     $command = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
     if ($command -and (Test-Path $command.Source)) {
-        return $command.Source
+        return (Resolve-RealFfmpegCandidate -CandidatePath $command.Source)
     }
 
     throw "ffmpeg.exe not found. Provide -FfmpegExe, run scripts/fetch_ffmpeg_windows.ps1, or install ffmpeg into PATH."
@@ -52,6 +86,9 @@ $ffmpegExe = Resolve-FfmpegExe -PreferredPath $FfmpegExe
 Ensure-FileExists -Path $hostExe -Label "Host executable"
 Ensure-FileExists -Path $consoleExe -Label "Console executable"
 Ensure-FileExists -Path $ffmpegExe -Label "FFmpeg executable"
+
+$ffmpegSizeMb = [Math]::Round(((Get-Item $ffmpegExe).Length / 1MB), 2)
+Write-Host "Using ffmpeg executable: $ffmpegExe ($ffmpegSizeMb MB)"
 
 $targets = @(
     @{
