@@ -111,7 +111,7 @@ impl StreamProfile {
         match self {
             Self::Fast => Duration::from_millis(28),
             Self::Balanced => Duration::from_millis(34),
-            Self::Sharp => Duration::from_millis(48),
+            Self::Sharp => Duration::from_millis(33),
         }
     }
 
@@ -119,7 +119,7 @@ impl StreamProfile {
         match self {
             Self::Fast => Duration::from_millis(90),
             Self::Balanced => Duration::from_millis(120),
-            Self::Sharp => Duration::from_millis(160),
+            Self::Sharp => Duration::from_millis(90),
         }
     }
 
@@ -127,7 +127,7 @@ impl StreamProfile {
         match self {
             Self::Fast => 36,
             Self::Balanced => 30,
-            Self::Sharp => 22,
+            Self::Sharp => 30,
         }
     }
 
@@ -143,7 +143,7 @@ impl StreamProfile {
         match self {
             Self::Fast => "1800k",
             Self::Balanced => "3000k",
-            Self::Sharp => "4500k",
+            Self::Sharp => "8000k",
         }
     }
 
@@ -151,7 +151,7 @@ impl StreamProfile {
         match self {
             Self::Fast => "900k",
             Self::Balanced => "1500k",
-            Self::Sharp => "2200k",
+            Self::Sharp => "4000k",
         }
     }
 }
