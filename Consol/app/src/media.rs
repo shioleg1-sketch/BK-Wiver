@@ -189,7 +189,7 @@ impl H264DecoderSession {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         configure_hidden_process(&mut command);
         let mut child = command.spawn().map_err(|error| error.to_string())?;
 
@@ -201,7 +201,19 @@ impl H264DecoderSession {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg decoder stdout is not available".to_owned())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "ffmpeg decoder stderr is not available".to_owned())?;
         let (exit_tx, exit_rx) = mpsc::channel();
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer);
+            let stderr_text = String::from_utf8_lossy(&buffer).trim().to_owned();
+            let _ = stderr_tx.send(stderr_text);
+        });
 
         thread::spawn(move || {
             let frame_len = (width as usize)
@@ -212,10 +224,18 @@ impl H264DecoderSession {
 
             loop {
                 if stdout.read_exact(&mut frame).is_err() {
+                    let stderr_text = stderr_rx.try_recv().unwrap_or_default();
                     logging::append_log(
                         "WARN",
                         "media.h264_decoder",
-                        "decoder stdout ended or frame read failed",
+                        if stderr_text.is_empty() {
+                            "decoder stdout ended or frame read failed".to_owned()
+                        } else {
+                            format!(
+                                "decoder stdout ended or frame read failed: {}",
+                                stderr_text
+                            )
+                        },
                     );
                     break;
                 }
