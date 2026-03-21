@@ -307,6 +307,7 @@ pub fn spawn_listener(
                     let mut h264_decoder: Option<H264DecoderSession> = None;
                     let mut h264_config: Option<H264Config> = None;
                     let mut h264_disabled_flavors: Vec<H264DecoderFlavor> = Vec::new();
+                    let mut h264_packet_count = 0_u64;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -361,6 +362,20 @@ pub fn spawn_listener(
                                             }
                                         }
                                         (MediaCodec::H264, MediaPacketKind::Frame) => {
+                                            h264_packet_count = h264_packet_count.saturating_add(1);
+                                            if h264_packet_count == 1 || h264_packet_count % 120 == 0
+                                            {
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.h264_decoder",
+                                                    format!(
+                                                        "packet received session_id={} bytes={} count={}",
+                                                        session_id,
+                                                        payload.len(),
+                                                        h264_packet_count
+                                                    ),
+                                                );
+                                            }
                                             if h264_decoder.is_none()
                                                 && let Some(config) = h264_config
                                             {
@@ -387,6 +402,16 @@ pub fn spawn_listener(
                                                     h264_disabled_flavors.push(decoder.flavor());
                                                     h264_decoder = None;
                                                 }
+                                            } else if h264_config.is_some() {
+                                                logging::append_log(
+                                                    "WARN",
+                                                    "media.h264_decoder",
+                                                    format!(
+                                                        "packet dropped session_id={} bytes={} because decoder is unavailable",
+                                                        session_id,
+                                                        payload.len()
+                                                    ),
+                                                );
                                             }
                                         }
                                         _ => {}
