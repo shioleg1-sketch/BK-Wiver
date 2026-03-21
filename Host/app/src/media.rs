@@ -1,15 +1,19 @@
 use std::{
-    env,
     io::{Cursor, Read, Write},
-    path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
+};
+
+#[cfg(not(windows))]
+use std::{
+    env,
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
 };
 
 use image::{ColorType, ImageEncoder, RgbaImage, codecs::jpeg::JpegEncoder};
@@ -21,6 +25,11 @@ use crate::{capture::CaptureEngine, logging};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+mod windows_encoder;
+#[cfg(windows)]
+use windows_encoder::H264EncoderSession;
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
@@ -156,6 +165,7 @@ impl StreamProfile {
     }
 }
 
+#[cfg(not(windows))]
 struct H264EncoderSession {
     child: Child,
     stdin: ChildStdin,
@@ -165,6 +175,7 @@ struct H264EncoderSession {
     flavor: H264EncoderFlavor,
 }
 
+#[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum H264EncoderFlavor {
     #[cfg(windows)]
@@ -178,6 +189,7 @@ enum H264EncoderFlavor {
     Libx264,
 }
 
+#[cfg(not(windows))]
 impl H264EncoderFlavor {
     fn label(self) -> &'static str {
         match self {
@@ -322,6 +334,7 @@ impl H264EncoderFlavor {
     }
 }
 
+#[cfg(not(windows))]
 fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
     let mut candidates = vec![H264EncoderFlavor::Libx264];
     #[cfg(windows)]
@@ -337,6 +350,7 @@ fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
     candidates
 }
 
+#[cfg(not(windows))]
 impl H264EncoderSession {
     fn new(
         width: u32,
@@ -446,6 +460,7 @@ impl H264EncoderSession {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for H264EncoderSession {
     fn drop(&mut self) {
         let _ = self.stdin.flush();
@@ -479,10 +494,15 @@ pub fn spawn_stream(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_encoder: Option<H264EncoderSession> = None;
+                    #[cfg(not(windows))]
                     let mut h264_disabled_flavors: Vec<H264EncoderFlavor> = Vec::new();
+                    #[cfg(windows)]
+                    let mut h264_disabled_flavors: Vec<()> = Vec::new();
                     let mut h264_config_sent = false;
+                    let mut perf_log_frame_index = 0_u64;
                     h264_no_output_streak = 0;
                     while !stop_flag.load(Ordering::Relaxed) {
+                        let loop_started_at = Instant::now();
                         stream_tick = stream_tick.saturating_add(1);
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
@@ -491,7 +511,9 @@ pub fn spawn_stream(
                             .map(|guard| *guard)
                             .unwrap_or(StreamCodec::Auto);
 
+                        let capture_started_at = Instant::now();
                         let captured = capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                        let capture_elapsed = capture_started_at.elapsed();
                         let frame_image = captured.image;
                         frame_index = frame_index.wrapping_add(1);
 
@@ -522,9 +544,13 @@ pub fn spawn_stream(
                         }
 
                         let mut sent_frame = false;
-                        let should_try_h264 =
-                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264)
-                                && stream_tick >= h264_restart_allowed_at_tick;
+                        let mut path_label = "idle-skip";
+                        let mut encode_elapsed = Duration::ZERO;
+                        let mut send_elapsed = Duration::ZERO;
+                        let mut packets_produced = 0_usize;
+                        let wants_h264 =
+                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264);
+                        let should_try_h264 = wants_h264 && stream_tick >= h264_restart_allowed_at_tick;
                         if should_try_h264 {
                             match ensure_h264_encoder(
                                 &mut h264_encoder,
@@ -535,12 +561,16 @@ pub fn spawn_stream(
                             ) {
                                 Ok(()) => {
                                     if let Some(encoder) = &mut h264_encoder {
+                                        let encode_started_at = Instant::now();
                                         if encoder.push_frame(&frame_image).is_ok() {
+                                            encode_elapsed = encode_started_at.elapsed();
                                             let packets = encoder.drain_packets();
+                                            packets_produced = packets.len();
                                             if packets.is_empty() {
                                                 h264_no_output_streak =
                                                     h264_no_output_streak.saturating_add(1);
                                                 if h264_no_output_streak >= 3 {
+                                                    #[cfg(not(windows))]
                                                     logging::append_log(
                                                         "WARN",
                                                         "media.h264_encoder",
@@ -550,8 +580,20 @@ pub fn spawn_stream(
                                                             encoder.flavor().label()
                                                         ),
                                                     );
+                                                    #[cfg(windows)]
+                                                    logging::append_log(
+                                                        "WARN",
+                                                        "media.h264_encoder",
+                                                        format!(
+                                                            "no h264 output after {} frames on media-foundation; switching to jpeg fallback",
+                                                            h264_no_output_streak
+                                                        ),
+                                                    );
+                                                    #[cfg(not(windows))]
                                                     h264_disabled_flavors
                                                         .push(encoder.flavor());
+                                                    #[cfg(windows)]
+                                                    h264_disabled_flavors.push(());
                                                     h264_encoder = None;
                                                     h264_config_sent = false;
                                                     h264_restart_allowed_at_tick =
@@ -559,15 +601,27 @@ pub fn spawn_stream(
                                                     h264_no_output_streak = 0;
                                                 }
                                             } else {
+                                                path_label = "h264";
                                                 h264_no_output_streak = 0;
                                                 if !h264_config_sent {
                                                     let (width, height) = encoder.dimensions();
+                                                    #[cfg(not(windows))]
                                                     logging::append_log(
                                                         "INFO",
                                                         "media.h264_encoder",
                                                         format!(
                                                             "config sent encoder={} width={} height={}",
                                                             encoder.flavor().label(),
+                                                            width,
+                                                            height
+                                                        ),
+                                                    );
+                                                    #[cfg(windows)]
+                                                    logging::append_log(
+                                                        "INFO",
+                                                        "media.h264_encoder",
+                                                        format!(
+                                                            "config sent encoder=media-foundation width={} height={}",
                                                             width,
                                                             height
                                                         ),
@@ -596,6 +650,7 @@ pub fn spawn_stream(
                                                     h264_config_sent = true;
                                                 }
                                             }
+                                            let send_started_at = Instant::now();
                                             for packet in packets {
                                                 let packet = encode_media_packet(
                                                     StreamCodec::H264,
@@ -623,7 +678,9 @@ pub fn spawn_stream(
                                                 }
                                                 sent_frame = true;
                                             }
+                                            send_elapsed = send_started_at.elapsed();
                                         } else {
+                                            #[cfg(not(windows))]
                                             logging::append_log(
                                                 "WARN",
                                                 "media.h264_encoder",
@@ -632,7 +689,16 @@ pub fn spawn_stream(
                                                     encoder.flavor().label()
                                                 ),
                                             );
+                                            #[cfg(windows)]
+                                            logging::append_log(
+                                                "WARN",
+                                                "media.h264_encoder",
+                                                "media foundation input failed, falling back to jpeg",
+                                            );
+                                            #[cfg(not(windows))]
                                             h264_disabled_flavors.push(encoder.flavor());
+                                            #[cfg(windows)]
+                                            h264_disabled_flavors.push(());
                                             h264_encoder = None;
                                             h264_config_sent = false;
                                             h264_restart_allowed_at_tick =
@@ -660,15 +726,21 @@ pub fn spawn_stream(
                         }
 
                         if !sent_frame {
+                            let encode_started_at = Instant::now();
                             let Ok(frame) = encode_jpeg(&frame_image, stream_profile.jpeg_quality())
                             else {
                                 break;
                             };
+                            encode_elapsed = encode_started_at.elapsed();
                             let packet =
                                 encode_media_packet(StreamCodec::Jpeg, MediaPacketKind::Frame, &frame);
+                            let send_started_at = Instant::now();
                             if socket.send(Message::Binary(packet.into())).is_err() {
                                 break;
                             }
+                            send_elapsed = send_started_at.elapsed();
+                            path_label = "jpeg";
+                            packets_produced = 1;
                             sent_frame = true;
                         }
 
@@ -676,11 +748,34 @@ pub fn spawn_stream(
                             last_sent_tick = stream_tick;
                         }
 
-                        thread::sleep(if is_active {
+                        let sleep_duration = if is_active {
                             stream_profile.active_frame_delay()
                         } else {
                             stream_profile.idle_frame_delay()
-                        });
+                        };
+                        perf_log_frame_index = perf_log_frame_index.saturating_add(1);
+                        if sent_frame && (perf_log_frame_index <= 5 || perf_log_frame_index % 60 == 0) {
+                            logging::append_log(
+                                "INFO",
+                                "media.perf",
+                                format!(
+                                    "session_id={} path={} profile={} active={} frame={} capture_ms={} encode_ms={} send_ms={} packets={} total_ms={} sleep_ms={}",
+                                    session_id,
+                                    path_label,
+                                    stream_profile.wire_name(),
+                                    is_active,
+                                    perf_log_frame_index,
+                                    capture_elapsed.as_millis(),
+                                    encode_elapsed.as_millis(),
+                                    send_elapsed.as_millis(),
+                                    packets_produced,
+                                    loop_started_at.elapsed().as_millis(),
+                                    sleep_duration.as_millis(),
+                                ),
+                            );
+                        }
+
+                        thread::sleep(sleep_duration);
                     }
 
                     let _ = socket.close(None);
@@ -754,6 +849,7 @@ pub fn ffmpeg_executable_path() -> PathBuf {
     PathBuf::from("ffmpeg")
 }
 
+#[cfg(not(windows))]
 fn ensure_h264_encoder(
     encoder: &mut Option<H264EncoderSession>,
     disabled_flavors: &[H264EncoderFlavor],
@@ -792,6 +888,32 @@ fn ensure_h264_encoder(
     }
 
     Err(last_error.unwrap_or_else(|| "no available h264 encoders after fallback attempts".to_owned()))
+}
+
+#[cfg(windows)]
+fn ensure_h264_encoder(
+    encoder: &mut Option<H264EncoderSession>,
+    _disabled_flavors: &[()],
+    width: u32,
+    height: u32,
+    profile: StreamProfile,
+) -> Result<(), String> {
+    let needs_restart = encoder
+        .as_ref()
+        .map(|active| !active.matches(width, height))
+        .unwrap_or(true);
+
+    if !needs_restart {
+        return Ok(());
+    }
+
+    match H264EncoderSession::new(width, height, profile) {
+        Ok(session) => {
+            *encoder = Some(session);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn configure_hidden_process(_command: &mut Command) {

@@ -388,6 +388,9 @@ struct ConsoleApp {
     media_last_frame_signature: u64,
     stream_quality_profile: StreamQualityProfile,
     stream_codec_preference: StreamCodecPreference,
+    last_synced_stream_session_id: Option<String>,
+    last_synced_stream_profile: Option<StreamQualityProfile>,
+    last_synced_stream_codec: Option<StreamCodecPreference>,
     remote_input_captured: bool,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
@@ -443,6 +446,9 @@ impl ConsoleApp {
             media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Sharp,
             stream_codec_preference: StreamCodecPreference::H264,
+            last_synced_stream_session_id: None,
+            last_synced_stream_profile: None,
+            last_synced_stream_codec: None,
             remote_input_captured: false,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
@@ -631,7 +637,7 @@ impl ConsoleApp {
                         self.status_line = format!("Сеанс {session_id} подтверждён хостом.");
                         self.add_activity(format!("Хост подтвердил сеанс {session_id}"));
                         if let Some(session) = self.last_session.clone() {
-                            self.sync_stream_profile(&session);
+                            self.sync_stream_profile(&session, "session.accepted");
                         }
                     }
                 }
@@ -754,6 +760,9 @@ impl ConsoleApp {
         self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Sharp;
         self.stream_codec_preference = StreamCodecPreference::H264;
+        self.last_synced_stream_session_id = None;
+        self.last_synced_stream_profile = None;
+        self.last_synced_stream_codec = None;
         self.remote_input_captured = false;
 
         if self.using_demo_data || !self.signed_in() {
@@ -809,9 +818,6 @@ impl ConsoleApp {
                     body.session_id, host.name
                 );
                 self.add_activity(format!("Создан сеанс для {}", host.name));
-                if let Some(session) = self.last_session.clone() {
-                    self.sync_stream_profile(&session);
-                }
             }
             Err(error) => {
                 logging::append_log("ERROR", "session.create", &error);
@@ -1363,13 +1369,20 @@ impl ConsoleApp {
         }
     }
 
-    fn sync_stream_profile(&mut self, session: &SessionPreview) {
+    fn sync_stream_profile(&mut self, session: &SessionPreview, reason: &str) {
         if self.using_demo_data || session.state == "demo" {
             return;
         }
         let Some(token) = self.access_token.clone() else {
             return;
         };
+
+        if self.last_synced_stream_session_id.as_deref() == Some(session.session_id.as_str())
+            && self.last_synced_stream_profile == Some(self.stream_quality_profile)
+            && self.last_synced_stream_codec == Some(self.stream_codec_preference)
+        {
+            return;
+        }
 
         if let Err(error) = signal::send_media_feedback(
             &normalize_server_url(&self.server_url),
@@ -1380,6 +1393,20 @@ impl ConsoleApp {
         ) {
             self.status_line = format!("Не удалось переключить профиль качества: {error}");
         } else {
+            logging::append_log(
+                "INFO",
+                "stream.profile_sync",
+                format!(
+                    "session_id={} reason={} profile={} codec={}",
+                    session.session_id,
+                    reason,
+                    self.stream_quality_profile.wire_name(),
+                    self.stream_codec_preference.wire_name()
+                ),
+            );
+            self.last_synced_stream_session_id = Some(session.session_id.clone());
+            self.last_synced_stream_profile = Some(self.stream_quality_profile);
+            self.last_synced_stream_codec = Some(self.stream_codec_preference);
             self.status_line = format!(
                 "Параметры потока: {} / {}.",
                 self.stream_quality_profile.label(),
@@ -1510,7 +1537,7 @@ impl ConsoleApp {
                             if self.stream_quality_profile != previous_profile
                                 || self.stream_codec_preference != previous_codec
                             {
-                                self.sync_stream_profile(&session);
+                                self.sync_stream_profile(&session, "ui.change");
                             }
                         });
                     });
