@@ -506,13 +506,17 @@ pub fn spawn_stream(
                         let signature = frame_signature(frame_image.as_raw());
                         let is_active = previous_signature
                             .as_ref()
-                            .map(|previous| signature_distance(previous, &signature) > 4)
+                            .map(|previous| signature_distance(previous, &signature) > 2)
                             .unwrap_or(true);
                         previous_signature = Some(signature);
                         let should_refresh_idle =
                             stream_tick.saturating_sub(last_sent_tick) >= IDLE_REFRESH_INTERVAL_TICKS;
+                        let h264_continuous_stream = matches!(
+                            preferred_codec,
+                            StreamCodec::Auto | StreamCodec::H264
+                        );
 
-                        if !is_active && !should_refresh_idle {
+                        if !is_active && !should_refresh_idle && !h264_continuous_stream {
                             thread::sleep(stream_profile.idle_frame_delay());
                             continue;
                         }
