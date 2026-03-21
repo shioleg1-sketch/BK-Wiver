@@ -1,11 +1,12 @@
 use std::{
     env,
+    fs::File,
     io::{Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver},
     },
     thread,
@@ -24,6 +25,7 @@ use std::os::windows::process::CommandExt;
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
+const H264_DUMP_LIMIT_BYTES: usize = 256 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -57,7 +59,70 @@ struct H264DecoderSession {
     stdin: ChildStdin,
     flavor: H264DecoderFlavor,
     exit_rx: Receiver<()>,
-    packet_write_count: u64,
+    packet_write_count: Arc<AtomicU64>,
+}
+
+struct H264DumpSession {
+    file: File,
+    bytes_written: usize,
+    path: PathBuf,
+}
+
+impl H264DumpSession {
+    fn new(session_id: &str) -> Result<Self, String> {
+        let path = logging::state_file_path(format!("h264-dump-{session_id}.h264"));
+        let file = File::create(&path).map_err(|error| error.to_string())?;
+        logging::append_log(
+            "INFO",
+            "media.h264_dump",
+            format!(
+                "capturing first {} bytes session_id={} path={}",
+                H264_DUMP_LIMIT_BYTES,
+                session_id,
+                path.display()
+            ),
+        );
+        Ok(Self {
+            file,
+            bytes_written: 0,
+            path,
+        })
+    }
+
+    fn write_packet(&mut self, bytes: &[u8], session_id: &str) {
+        if self.bytes_written >= H264_DUMP_LIMIT_BYTES {
+            return;
+        }
+        let remaining = H264_DUMP_LIMIT_BYTES.saturating_sub(self.bytes_written);
+        let chunk = &bytes[..bytes.len().min(remaining)];
+        if let Err(error) = self.file.write_all(chunk) {
+            logging::append_log(
+                "WARN",
+                "media.h264_dump",
+                format!(
+                    "write failed session_id={} path={} error={}",
+                    session_id,
+                    self.path.display(),
+                    error
+                ),
+            );
+            self.bytes_written = H264_DUMP_LIMIT_BYTES;
+            return;
+        }
+        self.bytes_written = self.bytes_written.saturating_add(chunk.len());
+        if self.bytes_written >= H264_DUMP_LIMIT_BYTES {
+            logging::append_log(
+                "INFO",
+                "media.h264_dump",
+                format!(
+                    "capture complete session_id={} bytes={} path={}",
+                    session_id,
+                    self.bytes_written,
+                    self.path.display()
+                ),
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -208,6 +273,8 @@ impl H264DecoderSession {
             .ok_or_else(|| "ffmpeg decoder stderr is not available".to_owned())?;
         let (exit_tx, exit_rx) = mpsc::channel();
         let (stderr_tx, stderr_rx) = mpsc::channel();
+        let packet_write_count = Arc::new(AtomicU64::new(0));
+        let decoded_frame_count = Arc::new(AtomicU64::new(0));
 
         thread::spawn(move || {
             let mut buffer = Vec::new();
@@ -216,6 +283,29 @@ impl H264DecoderSession {
             let _ = stderr_tx.send(stderr_text);
         });
 
+        let watchdog_packet_write_count = packet_write_count.clone();
+        let watchdog_decoded_frame_count = decoded_frame_count.clone();
+        let watchdog_session_id = session_id.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(2));
+            let written = watchdog_packet_write_count.load(Ordering::Relaxed);
+            let decoded = watchdog_decoded_frame_count.load(Ordering::Relaxed);
+            if decoded == 0 {
+                logging::append_log(
+                    "WARN",
+                    "media.h264_decoder",
+                    format!(
+                        "no decoded frame after startup session_id={} decoder={} packets_written={} decoded_frames={}",
+                        watchdog_session_id,
+                        flavor.label(),
+                        written,
+                        decoded
+                    ),
+                );
+            }
+        });
+
+        let reader_decoded_frame_count = decoded_frame_count.clone();
         thread::spawn(move || {
             let frame_len = (width as usize)
                 .saturating_mul(height as usize)
@@ -241,6 +331,7 @@ impl H264DecoderSession {
                     break;
                 }
                 frame_count = frame_count.saturating_add(1);
+                reader_decoded_frame_count.store(frame_count, Ordering::Relaxed);
                 if frame_count == 1 || frame_count % 120 == 0 {
                     logging::append_log(
                         "INFO",
@@ -264,7 +355,7 @@ impl H264DecoderSession {
             stdin,
             flavor,
             exit_rx,
-            packet_write_count: 0,
+            packet_write_count,
         })
     }
 
@@ -280,8 +371,11 @@ impl H264DecoderSession {
             ));
         }
         self.stdin.write_all(bytes).map_err(|error| error.to_string())?;
-        self.packet_write_count = self.packet_write_count.saturating_add(1);
-        if self.packet_write_count <= 5 || self.packet_write_count % 120 == 0 {
+        let packet_write_count = self
+            .packet_write_count
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if packet_write_count <= 5 || packet_write_count % 120 == 0 {
             logging::append_log(
                 "INFO",
                 "media.h264_decoder",
@@ -289,7 +383,7 @@ impl H264DecoderSession {
                     "packet written decoder={} bytes={} count={}",
                     self.flavor.label(),
                     bytes.len(),
-                    self.packet_write_count
+                    packet_write_count
                 ),
             );
         }
@@ -328,6 +422,7 @@ pub fn spawn_listener(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut h264_decoder: Option<H264DecoderSession> = None;
+                    let mut h264_dump: Option<H264DumpSession> = None;
                     let mut h264_config: Option<H264Config> = None;
                     let mut h264_disabled_flavors: Vec<H264DecoderFlavor> = Vec::new();
                     let mut h264_packet_count = 0_u64;
@@ -366,6 +461,7 @@ pub fn spawn_listener(
                                                 serde_json::from_slice::<H264Config>(&payload)
                                             {
                                                 h264_config = Some(config);
+                                                h264_dump = H264DumpSession::new(&session_id).ok();
                                                 logging::append_log(
                                                     "INFO",
                                                     "media.h264_decoder",
@@ -386,6 +482,9 @@ pub fn spawn_listener(
                                         }
                                         (MediaCodec::H264, MediaPacketKind::Frame) => {
                                             h264_packet_count = h264_packet_count.saturating_add(1);
+                                            if let Some(dump) = &mut h264_dump {
+                                                dump.write_packet(&payload, &session_id);
+                                            }
                                             if h264_packet_count <= 5
                                                 || h264_packet_count % 120 == 0
                                             {

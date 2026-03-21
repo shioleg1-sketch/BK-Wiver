@@ -52,6 +52,11 @@ pub fn export_diagnostic_report(status_line: &str) -> Result<PathBuf, String> {
     Ok(export_path)
 }
 
+pub fn state_file_path(name: impl AsRef<str>) -> PathBuf {
+    let _ = ensure_state_dir();
+    app_state_dir().join(name.as_ref())
+}
+
 fn console_log_path() -> PathBuf {
     app_state_dir().join(CONSOLE_LOG_FILE)
 }
