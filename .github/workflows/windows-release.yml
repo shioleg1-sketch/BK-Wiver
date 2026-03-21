@@ -27,30 +27,56 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release -p bk-wiver-host --bin bk-wiver-host
-          cargo build --release -p bk-wiver-console --bin bk-wiver-console
+          cargo build --release --manifest-path "Host/app/Cargo.toml" --bin bk-wiver-host
+          cargo build --release --manifest-path "Consol/app/Cargo.toml" --bin bk-wiver-console
 
       - name: Prepare installer staging
         shell: pwsh
         run: |
+          function Resolve-BinaryPath {
+            param(
+              [string[]]$Candidates,
+              [string]$Label
+            )
+
+            foreach ($candidate in $Candidates) {
+              if (Test-Path $candidate) {
+                return (Resolve-Path $candidate).Path
+              }
+            }
+
+            $names = $Candidates | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -Unique
+            foreach ($name in $names) {
+              $found = Get-ChildItem -Path $PWD -Recurse -File -Filter $name -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($found) {
+                return $found.FullName
+              }
+            }
+
+            Write-Host "Expected $Label binary not found. Known candidate paths:"
+            $Candidates | ForEach-Object { Write-Host " - $_" }
+            Write-Host "Discovered executables under workspace:"
+            Get-ChildItem -Path $PWD -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+              Select-Object FullName, Length, LastWriteTime |
+              Format-Table -AutoSize
+            throw "$Label binary not found in expected locations"
+          }
+
           New-Item -ItemType Directory -Force -Path "Host\installer\windows\stage" | Out-Null
           New-Item -ItemType Directory -Force -Path "Consol\installer\windows\stage" | Out-Null
-          $hostExe = Join-Path $PWD "target\release\bk-wiver-host.exe"
-          $consoleExe = Join-Path $PWD "target\release\bk-wiver-console.exe"
-          if (-not (Test-Path $hostExe)) {
-            Write-Host "Expected host binary not found at $hostExe"
-            if (Test-Path "target\release") {
-              Get-ChildItem -Path "target\release" | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
-            }
-            throw "bk-wiver-host.exe not found at target\\release"
-          }
-          if (-not (Test-Path $consoleExe)) {
-            Write-Host "Expected console binary not found at $consoleExe"
-            if (Test-Path "target\release") {
-              Get-ChildItem -Path "target\release" | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
-            }
-            throw "bk-wiver-console.exe not found at target\\release"
-          }
+          $hostExe = Resolve-BinaryPath -Label "host" -Candidates @(
+            (Join-Path $PWD "target\release\bk-wiver-host.exe"),
+            (Join-Path $PWD "target\release\bk_wiver_host.exe"),
+            (Join-Path $PWD "Host\app\target\release\bk-wiver-host.exe"),
+            (Join-Path $PWD "Host\app\target\release\bk_wiver_host.exe")
+          )
+          $consoleExe = Resolve-BinaryPath -Label "console" -Candidates @(
+            (Join-Path $PWD "target\release\bk-wiver-console.exe"),
+            (Join-Path $PWD "target\release\bk_wiver_console.exe"),
+            (Join-Path $PWD "Consol\app\target\release\bk-wiver-console.exe"),
+            (Join-Path $PWD "Consol\app\target\release\bk_wiver_console.exe")
+          )
           Copy-Item -Force $hostExe "Host\installer\windows\stage\bk-wiver-host.exe"
           Copy-Item -Force $consoleExe "Consol\installer\windows\stage\bk-wiver-console.exe"
 
