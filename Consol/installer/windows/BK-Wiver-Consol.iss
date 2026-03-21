@@ -1,5 +1,5 @@
 #define MyAppName "BK-Console"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.28"
 #define MyAppPublisher "BK-Wiver"
 #define MyAppExeName "bk-wiver-console.exe"
 #define MyAppSource ".\stage\bk-wiver-console.exe"

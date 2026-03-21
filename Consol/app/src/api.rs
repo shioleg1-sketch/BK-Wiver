@@ -84,8 +84,8 @@ pub fn sign_in(
             login: login.to_owned(),
             password: password.to_owned(),
             desktop_version: DesktopVersion {
-                version: "0.1.0".to_owned(),
-                commit: "console-shell".to_owned(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                commit: option_env!("BK_WIVER_COMMIT").unwrap_or("dev").to_owned(),
             },
         })
         .send()

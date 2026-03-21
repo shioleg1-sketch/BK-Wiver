@@ -1,6 +1,6 @@
 [package]
 name = "bk-wiver-console-macos"
-version = "0.1.0"
+version = "0.1.28"
 edition = "2024"
 
 [target.'cfg(target_os = "macos")'.dependencies]
