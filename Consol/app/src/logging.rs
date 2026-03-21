@@ -52,6 +52,13 @@ pub fn export_diagnostic_report(status_line: &str) -> Result<PathBuf, String> {
     Ok(export_path)
 }
 
+pub fn write_state_bytes(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    ensure_state_dir()?;
+    let path = app_state_dir().join(file_name);
+    fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
 fn console_log_path() -> PathBuf {
     app_state_dir().join(CONSOLE_LOG_FILE)
 }

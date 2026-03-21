@@ -50,6 +50,11 @@ struct Vp8DecoderSession {
     stdin: ChildStdin,
 }
 
+struct Vp8SampleCapture {
+    bytes: Vec<u8>,
+    dumped: bool,
+}
+
 impl Vp8DecoderSession {
     fn new(
         width: u32,
@@ -218,6 +223,7 @@ pub fn spawn_listener(
                 Ok((mut socket, _)) => {
                     let mut vp8_decoder: Option<Vp8DecoderSession> = None;
                     let mut vp8_frame_packet_count = 0_u64;
+                    let mut vp8_sample_capture: Option<Vp8SampleCapture> = None;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -256,6 +262,10 @@ pub fn spawn_listener(
                                                     session_id, width, height
                                                 ),
                                             );
+                                            vp8_sample_capture = Some(Vp8SampleCapture {
+                                                bytes: payload.clone(),
+                                                dumped: false,
+                                            });
                                             match Vp8DecoderSession::new(
                                                 width,
                                                 height,
@@ -304,6 +314,38 @@ pub fn spawn_listener(
                                                         payload.len()
                                                     ),
                                                 );
+                                            }
+                                            if let Some(sample) = &mut vp8_sample_capture
+                                                && !sample.dumped
+                                            {
+                                                sample.bytes.extend_from_slice(&payload);
+                                                match logging::write_state_bytes(
+                                                    &format!("vp8-sample-{}.ivf", session_id),
+                                                    &sample.bytes,
+                                                ) {
+                                                    Ok(path) => {
+                                                        logging::append_log(
+                                                            "INFO",
+                                                            "media.vp8_decoder",
+                                                            format!(
+                                                                "sample dumped session_id={} path={}",
+                                                                session_id,
+                                                                path.display()
+                                                            ),
+                                                        );
+                                                        sample.dumped = true;
+                                                    }
+                                                    Err(error) => {
+                                                        logging::append_log(
+                                                            "WARN",
+                                                            "media.vp8_decoder",
+                                                            format!(
+                                                                "sample dump failed session_id={} error={}",
+                                                                session_id, error
+                                                            ),
+                                                        );
+                                                    }
+                                                }
                                             }
                                             if let Some(decoder) = &mut vp8_decoder {
                                                 if let Err(error) = decoder.push_bytes(&payload) {
