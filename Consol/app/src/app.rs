@@ -123,25 +123,19 @@ enum StreamQualityProfile {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StreamCodecPreference {
-    Auto,
-    Jpeg,
-    H264,
+    Vp8,
 }
 
 impl StreamCodecPreference {
     fn wire_name(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
-            Self::Jpeg => "jpeg",
-            Self::H264 => "h264",
+            Self::Vp8 => "vp8",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Auto => "Auto",
-            Self::Jpeg => "JPEG",
-            Self::H264 => "H.264",
+            Self::Vp8 => "VP8",
         }
     }
 }
@@ -445,7 +439,7 @@ impl ConsoleApp {
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Sharp,
-            stream_codec_preference: StreamCodecPreference::H264,
+            stream_codec_preference: StreamCodecPreference::Vp8,
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,
             last_synced_stream_codec: None,
@@ -759,7 +753,7 @@ impl ConsoleApp {
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Sharp;
-        self.stream_codec_preference = StreamCodecPreference::H264;
+        self.stream_codec_preference = StreamCodecPreference::Vp8;
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;
         self.last_synced_stream_codec = None;
@@ -1003,29 +997,7 @@ impl ConsoleApp {
                         ),
                     );
                     match codec {
-                        MediaCodec::Jpeg => {
-                            let Ok(image) = image::load_from_memory(&bytes) else {
-                                continue;
-                            };
-                            let image = image.to_rgba8();
-                            let size = [image.width() as usize, image.height() as usize];
-                            let pixels = image.into_raw();
-                            let color_image =
-                                egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-
-                            if let Some(texture) = &mut self.session_texture {
-                                texture.set(color_image, egui::TextureOptions::LINEAR);
-                            } else {
-                                self.session_texture = Some(ctx.load_texture(
-                                    "remote-session-frame",
-                                    color_image,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                            self.media_connected_session_id = Some(session_id);
-                            ctx.request_repaint();
-                        }
-                        MediaCodec::H264 => {
+                        MediaCodec::Vp8 => {
                             let (Some(width), Some(height)) = (width, height) else {
                                 continue;
                             };
@@ -1468,8 +1440,7 @@ impl ConsoleApp {
                             });
                             ui.separator();
                             ui.label(match self.media_codec {
-                                Some(MediaCodec::Jpeg) => "codec jpeg",
-                                Some(MediaCodec::H264) => "codec h264",
+                                Some(MediaCodec::Vp8) => "codec vp8",
                                 None => "codec неизвестен",
                             });
                             ui.separator();
@@ -1494,7 +1465,6 @@ impl ConsoleApp {
                             });
                             ui.separator();
                             let previous_profile = self.stream_quality_profile;
-                            let previous_codec = self.stream_codec_preference;
                             egui::ComboBox::from_id_salt("session_quality_profile")
                                 .selected_text(self.stream_quality_profile.label())
                                 .show_ui(ui, |ui| {
@@ -1515,28 +1485,8 @@ impl ConsoleApp {
                                     );
                                 });
                             ui.separator();
-                            egui::ComboBox::from_id_salt("session_codec_preference")
-                                .selected_text(self.stream_codec_preference.label())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::Auto,
-                                        StreamCodecPreference::Auto.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::Jpeg,
-                                        StreamCodecPreference::Jpeg.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::H264,
-                                        StreamCodecPreference::H264.label(),
-                                    );
-                                });
-                            if self.stream_quality_profile != previous_profile
-                                || self.stream_codec_preference != previous_codec
-                            {
+                            ui.label("codec VP8");
+                            if self.stream_quality_profile != previous_profile {
                                 self.sync_stream_profile(&session, "ui.change");
                             }
                         });

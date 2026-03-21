@@ -3,6 +3,7 @@
 #define MyAppPublisher "BK-Wiver"
 #define MyAppExeName "bk-wiver-host.exe"
 #define MyAppSource ".\stage\bk-wiver-host.exe"
+#define MyFfmpegSource "..\..\third_party\ffmpeg\windows-x64\ffmpeg.exe"
 #define MyAppIcon "..\..\assets\app-icon.ico"
 #define MyServiceName "BKWiverHostService"
 #define MyServiceDisplayName "BK-Host Service"
@@ -30,6 +31,7 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Files]
 Source: "{#MyAppSource}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyFfmpegSource}"; DestDir: "{app}"; DestName: "ffmpeg.exe"; Flags: ignoreversion
 Source: "{#MyAppIcon}"; DestDir: "{app}"; DestName: "app-icon.ico"; Flags: ignoreversion
 
 [Icons]

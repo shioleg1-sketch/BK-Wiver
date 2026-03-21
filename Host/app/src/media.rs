@@ -1,5 +1,8 @@
 use std::{
-    io::Cursor,
+    env,
+    io::{Read, Write},
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -8,51 +11,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(windows))]
-use std::{
-    env,
-    io::{Read, Write},
-    path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
-};
-
-use image::{ColorType, ImageEncoder, RgbaImage, codecs::jpeg::JpegEncoder};
-use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
 use crate::{capture::CaptureEngine, logging};
 
-#[cfg(windows)]
-mod windows_encoder;
-#[cfg(windows)]
-use windows_encoder::H264EncoderSession;
-
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
 const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
+const IVF_HEADER_LEN: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
-    Auto,
-    Jpeg,
-    H264,
+    Vp8,
 }
 
 impl StreamCodec {
-    pub fn from_wire(value: &str) -> Self {
-        match value {
-            "jpeg" => Self::Jpeg,
-            "h264" => Self::H264,
-            _ => Self::Auto,
-        }
+    pub fn from_wire(_value: &str) -> Self {
+        Self::Vp8
     }
 
     fn code(self) -> u8 {
         match self {
-            Self::Auto | Self::Jpeg => 1,
-            Self::H264 => 2,
+            Self::Vp8 => 1,
         }
     }
 }
@@ -104,14 +85,6 @@ impl StreamProfile {
         }
     }
 
-    fn jpeg_quality(self) -> u8 {
-        match self {
-            Self::Fast => 65,
-            Self::Balanced => 80,
-            Self::Sharp => 90,
-        }
-    }
-
     fn active_frame_delay(self) -> Duration {
         match self {
             Self::Fast => Duration::from_millis(28),
@@ -138,235 +111,61 @@ impl StreamProfile {
 
     fn target_crf(self) -> &'static str {
         match self {
-            Self::Fast => "29",
-            Self::Balanced => "26",
-            Self::Sharp => "23",
+            Self::Fast => "35",
+            Self::Balanced => "31",
+            Self::Sharp => "27",
         }
     }
 
-    fn target_maxrate(self) -> &'static str {
+    fn target_bitrate(self) -> &'static str {
         match self {
             Self::Fast => "1800k",
-            Self::Balanced => "3000k",
-            Self::Sharp => "8000k",
+            Self::Balanced => "3200k",
+            Self::Sharp => "7000k",
         }
     }
 
-    fn target_bufsize(self) -> &'static str {
+    fn target_deadline(self) -> &'static str {
         match self {
-            Self::Fast => "900k",
-            Self::Balanced => "1500k",
-            Self::Sharp => "4000k",
+            Self::Fast => "realtime",
+            Self::Balanced => "realtime",
+            Self::Sharp => "good",
+        }
+    }
+
+    fn target_cpu_used(self) -> &'static str {
+        match self {
+            Self::Fast => "8",
+            Self::Balanced => "6",
+            Self::Sharp => "5",
         }
     }
 }
 
-#[cfg(not(windows))]
-struct H264EncoderSession {
+struct Vp8EncoderSession {
     child: Child,
     stdin: ChildStdin,
-    packet_rx: Receiver<Vec<u8>>,
+    packet_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     width: u32,
     height: u32,
-    flavor: H264EncoderFlavor,
+    profile: StreamProfile,
 }
 
-#[cfg(not(windows))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum H264EncoderFlavor {
-    #[cfg(windows)]
-    Nvenc,
-    #[cfg(windows)]
-    Qsv,
-    #[cfg(windows)]
-    Amf,
-    #[cfg(target_os = "macos")]
-    VideoToolbox,
-    Libx264,
-}
-
-#[cfg(not(windows))]
-impl H264EncoderFlavor {
-    fn label(self) -> &'static str {
-        match self {
-            #[cfg(windows)]
-            Self::Nvenc => "h264_nvenc",
-            #[cfg(windows)]
-            Self::Qsv => "h264_qsv",
-            #[cfg(windows)]
-            Self::Amf => "h264_amf",
-            #[cfg(target_os = "macos")]
-            Self::VideoToolbox => "h264_videotoolbox",
-            Self::Libx264 => "libx264",
-        }
-    }
-
-    fn append_ffmpeg_args(self, command: &mut Command, profile: StreamProfile) {
-        match self {
-            #[cfg(windows)]
-            Self::Nvenc => {
-                command
-                    .arg("-c:v")
-                    .arg("h264_nvenc")
-                    .arg("-preset")
-                    .arg("p1")
-                    .arg("-tune")
-                    .arg("ll")
-                    .arg("-rc:v")
-                    .arg("vbr")
-                    .arg("-cq:v")
-                    .arg(profile.target_crf())
-                    .arg("-b:v")
-                    .arg("0")
-                    .arg("-maxrate")
-                    .arg(profile.target_maxrate())
-                    .arg("-bufsize")
-                    .arg(profile.target_bufsize())
-                    .arg("-profile:v")
-                    .arg("baseline")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p")
-                    .arg("-g")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-bf")
-                    .arg("0");
-            }
-            #[cfg(windows)]
-            Self::Qsv => {
-                command
-                    .arg("-c:v")
-                    .arg("h264_qsv")
-                    .arg("-preset")
-                    .arg("veryfast")
-                    .arg("-look_ahead")
-                    .arg("0")
-                    .arg("-maxrate")
-                    .arg(profile.target_maxrate())
-                    .arg("-bufsize")
-                    .arg(profile.target_bufsize())
-                    .arg("-profile:v")
-                    .arg("baseline")
-                    .arg("-pix_fmt")
-                    .arg("nv12")
-                    .arg("-g")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-bf")
-                    .arg("0");
-            }
-            #[cfg(windows)]
-            Self::Amf => {
-                command
-                    .arg("-c:v")
-                    .arg("h264_amf")
-                    .arg("-usage")
-                    .arg("ultralowlatency")
-                    .arg("-quality")
-                    .arg("speed")
-                    .arg("-maxrate")
-                    .arg(profile.target_maxrate())
-                    .arg("-bufsize")
-                    .arg(profile.target_bufsize())
-                    .arg("-profile:v")
-                    .arg("baseline")
-                    .arg("-pix_fmt")
-                    .arg("nv12")
-                    .arg("-g")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-bf")
-                    .arg("0");
-            }
-            #[cfg(target_os = "macos")]
-            Self::VideoToolbox => {
-                command
-                    .arg("-c:v")
-                    .arg("h264_videotoolbox")
-                    .arg("-realtime")
-                    .arg("1")
-                    .arg("-allow_sw")
-                    .arg("1")
-                    .arg("-maxrate")
-                    .arg(profile.target_maxrate())
-                    .arg("-bufsize")
-                    .arg(profile.target_bufsize())
-                    .arg("-profile:v")
-                    .arg("baseline")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p")
-                    .arg("-g")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-bf")
-                    .arg("0");
-            }
-            Self::Libx264 => {
-                command
-                    .arg("-c:v")
-                    .arg("libx264")
-                    .arg("-preset")
-                    .arg("ultrafast")
-                    .arg("-tune")
-                    .arg("zerolatency")
-                    .arg("-profile:v")
-                    .arg("baseline")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p")
-                    .arg("-bf")
-                    .arg("0")
-                    .arg("-refs")
-                    .arg("1")
-                    .arg("-crf")
-                    .arg(profile.target_crf())
-                    .arg("-maxrate")
-                    .arg(profile.target_maxrate())
-                    .arg("-bufsize")
-                    .arg(profile.target_bufsize())
-                    .arg("-g")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-keyint_min")
-                    .arg(profile.target_fps().to_string())
-                    .arg("-x264-params")
-                    .arg("scenecut=0:repeat-headers=1:bframes=0:sync-lookahead=0:rc-lookahead=0:sliced-threads=1");
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn h264_encoder_candidates() -> Vec<H264EncoderFlavor> {
-    let mut candidates = vec![H264EncoderFlavor::Libx264];
-    #[cfg(windows)]
-    {
-        candidates.push(H264EncoderFlavor::Nvenc);
-        candidates.push(H264EncoderFlavor::Qsv);
-        candidates.push(H264EncoderFlavor::Amf);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        candidates.push(H264EncoderFlavor::VideoToolbox);
-    }
-    candidates
-}
-
-#[cfg(not(windows))]
-impl H264EncoderSession {
-    fn new(
-        width: u32,
-        height: u32,
-        profile: StreamProfile,
-        flavor: H264EncoderFlavor,
-    ) -> Result<Self, String> {
+impl Vp8EncoderSession {
+    fn new(width: u32, height: u32, profile: StreamProfile) -> Result<Self, String> {
         let ffmpeg = ffmpeg_executable_path();
         logging::append_log(
             "INFO",
-            "media.h264_encoder",
+            "media.vp8_encoder",
             format!(
-                "starting ffmpeg={} encoder={} width={} height={} fps={}",
+                "starting ffmpeg={} encoder=libvpx width={} height={} fps={}",
                 ffmpeg.display(),
-                flavor.label(),
                 width,
                 height,
                 profile.target_fps()
             ),
         );
+
         let mut command = Command::new(ffmpeg);
         command
             .arg("-loglevel")
@@ -381,19 +180,37 @@ impl H264EncoderSession {
             .arg(profile.target_fps().to_string())
             .arg("-i")
             .arg("pipe:0")
-            .arg("-an");
-        flavor.append_ffmpeg_args(&mut command, profile);
-        command
+            .arg("-an")
+            .arg("-c:v")
+            .arg("libvpx")
+            .arg("-deadline")
+            .arg(profile.target_deadline())
+            .arg("-cpu-used")
+            .arg(profile.target_cpu_used())
+            .arg("-lag-in-frames")
+            .arg("0")
+            .arg("-error-resilient")
+            .arg("1")
+            .arg("-auto-alt-ref")
+            .arg("0")
+            .arg("-g")
+            .arg(profile.target_fps().to_string())
+            .arg("-keyint_min")
+            .arg(profile.target_fps().to_string())
+            .arg("-crf")
+            .arg(profile.target_crf())
+            .arg("-b:v")
+            .arg(profile.target_bitrate())
+            .arg("-threads")
+            .arg("4")
             .arg("-f")
-            .arg("h264")
+            .arg("ivf")
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        configure_hidden_process(&mut command);
 
         let mut child = command.spawn().map_err(|error| error.to_string())?;
-
         let stdin = child
             .stdin
             .take()
@@ -402,7 +219,7 @@ impl H264EncoderSession {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg stdout is not available".to_owned())?;
-        let (packet_tx, packet_rx) = mpsc::channel();
+        let (packet_tx, packet_rx) = std::sync::mpsc::channel();
 
         thread::spawn(move || {
             let mut buffer = [0_u8; 8192];
@@ -425,11 +242,11 @@ impl H264EncoderSession {
             packet_rx,
             width,
             height,
-            flavor,
+            profile,
         })
     }
 
-    fn push_frame(&mut self, image: &RgbaImage) -> Result<(), String> {
+    fn push_frame(&mut self, image: &image::RgbaImage) -> Result<(), String> {
         self.stdin
             .write_all(image.as_raw())
             .map_err(|error| error.to_string())
@@ -443,12 +260,8 @@ impl H264EncoderSession {
         packets
     }
 
-    fn matches(&self, width: u32, height: u32) -> bool {
-        self.width == width && self.height == height
-    }
-
-    fn flavor(&self) -> H264EncoderFlavor {
-        self.flavor
+    fn matches(&self, width: u32, height: u32, profile: StreamProfile) -> bool {
+        self.width == width && self.height == height && self.profile == profile
     }
 
     fn dimensions(&self) -> (u32, u32) {
@@ -456,8 +269,7 @@ impl H264EncoderSession {
     }
 }
 
-#[cfg(not(windows))]
-impl Drop for H264EncoderSession {
+impl Drop for Vp8EncoderSession {
     fn drop(&mut self) {
         let _ = self.stdin.flush();
         let _ = self.child.kill();
@@ -471,7 +283,7 @@ pub fn spawn_stream(
     session_id: String,
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<StreamProfile>>,
-    codec_preference: Arc<Mutex<StreamCodec>>,
+    _codec_preference: Arc<Mutex<StreamCodec>>,
 ) {
     thread::spawn(move || {
         let Ok(url) = media_url(&server_url, &token, &session_id) else {
@@ -482,33 +294,26 @@ pub fn spawn_stream(
         let mut stream_tick = 0_u64;
         let mut capture_engine = CaptureEngine::new();
         let mut previous_signature: Option<Vec<u8>> = None;
-        let mut h264_no_output_streak: u32;
-        let mut h264_packets_sent = 0_u64;
-        let mut h264_restart_allowed_at_tick = 0_u64;
         let mut last_sent_tick = 0_u64;
+
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
-                    let mut h264_encoder: Option<H264EncoderSession> = None;
-                    #[cfg(not(windows))]
-                    let mut h264_disabled_flavors: Vec<H264EncoderFlavor> = Vec::new();
-                    #[cfg(windows)]
-                    let mut h264_disabled_flavors: Vec<()> = Vec::new();
-                    let mut h264_config_sent = false;
+                    let mut vp8_encoder: Option<Vp8EncoderSession> = None;
+                    let mut vp8_config_sent = false;
+                    let mut vp8_header_buffer = Vec::new();
+                    let mut vp8_chunks_sent = 0_u64;
                     let mut perf_log_frame_index = 0_u64;
-                    h264_no_output_streak = 0;
+
                     while !stop_flag.load(Ordering::Relaxed) {
                         let loop_started_at = Instant::now();
                         stream_tick = stream_tick.saturating_add(1);
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
-                        let preferred_codec = codec_preference
-                            .lock()
-                            .map(|guard| *guard)
-                            .unwrap_or(StreamCodec::Auto);
 
                         let capture_started_at = Instant::now();
-                        let captured = capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                        let captured =
+                            capture_engine.capture(stream_profile.max_dimensions(), frame_index);
                         let capture_elapsed = capture_started_at.elapsed();
                         let frame_image = captured.image;
                         frame_index = frame_index.wrapping_add(1);
@@ -529,219 +334,139 @@ pub fn spawn_stream(
                         previous_signature = Some(signature);
                         let should_refresh_idle =
                             stream_tick.saturating_sub(last_sent_tick) >= IDLE_REFRESH_INTERVAL_TICKS;
-                        let h264_continuous_stream = matches!(
-                            preferred_codec,
-                            StreamCodec::Auto | StreamCodec::H264
-                        );
 
-                        if !is_active && !should_refresh_idle && !h264_continuous_stream {
+                        if !is_active && !should_refresh_idle {
                             thread::sleep(stream_profile.idle_frame_delay());
                             continue;
                         }
 
                         let mut sent_frame = false;
-                        let mut path_label = "idle-skip";
+                        let mut path_label = "vp8";
                         let mut encode_elapsed = Duration::ZERO;
                         let mut send_elapsed = Duration::ZERO;
                         let mut packets_produced = 0_usize;
-                        let wants_h264 =
-                            matches!(preferred_codec, StreamCodec::Auto | StreamCodec::H264);
-                        let should_try_h264 = wants_h264 && stream_tick >= h264_restart_allowed_at_tick;
-                        if should_try_h264 {
-                            match ensure_h264_encoder(
-                                &mut h264_encoder,
-                                &h264_disabled_flavors,
-                                frame_image.width(),
-                                frame_image.height(),
-                                stream_profile,
-                            ) {
-                                Ok(()) => {
-                                    if let Some(encoder) = &mut h264_encoder {
-                                        let encode_started_at = Instant::now();
-                                        if encoder.push_frame(&frame_image).is_ok() {
-                                            encode_elapsed = encode_started_at.elapsed();
-                                            let packets = encoder.drain_packets();
-                                            packets_produced = packets.len();
-                                            if packets.is_empty() {
-                                                h264_no_output_streak =
-                                                    h264_no_output_streak.saturating_add(1);
-                                                if h264_no_output_streak >= 3 {
-                                                    #[cfg(not(windows))]
-                                                    logging::append_log(
-                                                        "WARN",
-                                                        "media.h264_encoder",
-                                                        format!(
-                                                            "no h264 output after {} frames on {}; switching to jpeg fallback",
-                                                            h264_no_output_streak,
-                                                            encoder.flavor().label()
-                                                        ),
-                                                    );
-                                                    #[cfg(windows)]
-                                                    logging::append_log(
-                                                        "WARN",
-                                                        "media.h264_encoder",
-                                                        format!(
-                                                            "no h264 output after {} frames on media-foundation; switching to jpeg fallback",
-                                                            h264_no_output_streak
-                                                        ),
-                                                    );
-                                                    #[cfg(not(windows))]
-                                                    h264_disabled_flavors
-                                                        .push(encoder.flavor());
-                                                    #[cfg(windows)]
-                                                    h264_disabled_flavors.push(());
-                                                    h264_encoder = None;
-                                                    h264_config_sent = false;
-                                                    h264_restart_allowed_at_tick =
-                                                        stream_tick.saturating_add(24);
-                                                    h264_no_output_streak = 0;
+
+                        match ensure_vp8_encoder(
+                            &mut vp8_encoder,
+                            frame_image.width(),
+                            frame_image.height(),
+                            stream_profile,
+                        ) {
+                            Ok(()) => {
+                                if let Some(encoder) = &mut vp8_encoder {
+                                    let encode_started_at = Instant::now();
+                                    if encoder.push_frame(&frame_image).is_ok() {
+                                        encode_elapsed = encode_started_at.elapsed();
+                                        let chunks = encoder.drain_packets();
+                                        packets_produced = chunks.len();
+                                        let send_started_at = Instant::now();
+
+                                        for chunk in chunks {
+                                            if !vp8_config_sent {
+                                                vp8_header_buffer.extend_from_slice(&chunk);
+                                                if vp8_header_buffer.len() < IVF_HEADER_LEN {
+                                                    continue;
                                                 }
-                                            } else {
-                                                path_label = "h264";
-                                                h264_no_output_streak = 0;
-                                                if !h264_config_sent {
-                                                    let (width, height) = encoder.dimensions();
-                                                    #[cfg(not(windows))]
-                                                    logging::append_log(
-                                                        "INFO",
-                                                        "media.h264_encoder",
-                                                        format!(
-                                                            "config sent encoder={} width={} height={}",
-                                                            encoder.flavor().label(),
-                                                            width,
-                                                            height
-                                                        ),
-                                                    );
-                                                    #[cfg(windows)]
-                                                    logging::append_log(
-                                                        "INFO",
-                                                        "media.h264_encoder",
-                                                        format!(
-                                                            "config sent encoder=media-foundation width={} height={}",
-                                                            width,
-                                                            height
-                                                        ),
-                                                    );
-                                                    let config = json!({
-                                                        "width": width,
-                                                        "height": height,
-                                                    });
-                                                    let payload = serde_json::to_vec(&config)
-                                                        .map_err(|error| error.to_string())
-                                                        .unwrap_or_default();
-                                                    if payload.is_empty() {
-                                                        break;
-                                                    }
-                                                    let packet = encode_media_packet(
-                                                        StreamCodec::H264,
-                                                        MediaPacketKind::Config,
-                                                        &payload,
-                                                    );
-                                                    if socket
-                                                        .send(Message::Binary(packet.into()))
-                                                        .is_err()
-                                                    {
-                                                        break;
-                                                    }
-                                                    h264_config_sent = true;
-                                                }
-                                            }
-                                            let send_started_at = Instant::now();
-                                            for packet in packets {
-                                                let packet = encode_media_packet(
-                                                    StreamCodec::H264,
-                                                    MediaPacketKind::Frame,
-                                                    &packet,
+
+                                                let header = vp8_header_buffer[..IVF_HEADER_LEN].to_vec();
+                                                let config_packet = encode_media_packet(
+                                                    StreamCodec::Vp8,
+                                                    MediaPacketKind::Config,
+                                                    &header,
                                                 );
-                                                if socket.send(Message::Binary(packet.into())).is_err()
+                                                if socket
+                                                    .send(Message::Binary(config_packet.into()))
+                                                    .is_err()
                                                 {
                                                     sent_frame = false;
                                                     break;
                                                 }
-                                                h264_packets_sent =
-                                                    h264_packets_sent.saturating_add(1);
-                                                if h264_packets_sent == 1
-                                                    || h264_packets_sent % 120 == 0
-                                                {
-                                                    logging::append_log(
-                                                        "INFO",
-                                                        "media.h264_encoder",
-                                                        format!(
-                                                            "sent_h264_packets={}",
-                                                            h264_packets_sent
-                                                        ),
+                                                let (width, height) = encoder.dimensions();
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.vp8_encoder",
+                                                    format!(
+                                                        "config sent encoder=libvpx width={} height={}",
+                                                        width, height
+                                                    ),
+                                                );
+                                                vp8_config_sent = true;
+
+                                                if vp8_header_buffer.len() > IVF_HEADER_LEN {
+                                                    let remainder =
+                                                        vp8_header_buffer[IVF_HEADER_LEN..].to_vec();
+                                                    let frame_packet = encode_media_packet(
+                                                        StreamCodec::Vp8,
+                                                        MediaPacketKind::Frame,
+                                                        &remainder,
                                                     );
+                                                    if socket
+                                                        .send(Message::Binary(frame_packet.into()))
+                                                        .is_err()
+                                                    {
+                                                        sent_frame = false;
+                                                        break;
+                                                    }
+                                                    vp8_chunks_sent =
+                                                        vp8_chunks_sent.saturating_add(1);
+                                                    sent_frame = true;
                                                 }
+                                                vp8_header_buffer.clear();
+                                            } else {
+                                                let frame_packet = encode_media_packet(
+                                                    StreamCodec::Vp8,
+                                                    MediaPacketKind::Frame,
+                                                    &chunk,
+                                                );
+                                                if socket.send(Message::Binary(frame_packet.into())).is_err()
+                                                {
+                                                    sent_frame = false;
+                                                    break;
+                                                }
+                                                vp8_chunks_sent =
+                                                    vp8_chunks_sent.saturating_add(1);
                                                 sent_frame = true;
                                             }
-                                            send_elapsed = send_started_at.elapsed();
-                                        } else {
-                                            #[cfg(not(windows))]
-                                            logging::append_log(
-                                                "WARN",
-                                                "media.h264_encoder",
-                                                format!(
-                                                    "ffmpeg stdin write failed on {}, falling back to jpeg",
-                                                    encoder.flavor().label()
-                                                ),
-                                            );
-                                            #[cfg(windows)]
-                                            logging::append_log(
-                                                "WARN",
-                                                "media.h264_encoder",
-                                                "media foundation input failed, falling back to jpeg",
-                                            );
-                                            #[cfg(not(windows))]
-                                            h264_disabled_flavors.push(encoder.flavor());
-                                            #[cfg(windows)]
-                                            h264_disabled_flavors.push(());
-                                            h264_encoder = None;
-                                            h264_config_sent = false;
-                                            h264_restart_allowed_at_tick =
-                                                stream_tick.saturating_add(24);
-                                            h264_no_output_streak = 0;
                                         }
+
+                                        if sent_frame
+                                            && (vp8_chunks_sent == 1 || vp8_chunks_sent % 120 == 0)
+                                        {
+                                            logging::append_log(
+                                                "INFO",
+                                                "media.vp8_encoder",
+                                                format!("sent_vp8_chunks={}", vp8_chunks_sent),
+                                            );
+                                        }
+                                        send_elapsed = send_started_at.elapsed();
+                                    } else {
+                                        logging::append_log(
+                                            "WARN",
+                                            "media.vp8_encoder",
+                                            "ffmpeg stdin write failed, restarting encoder",
+                                        );
+                                        vp8_encoder = None;
+                                        vp8_config_sent = false;
+                                        vp8_header_buffer.clear();
                                     }
                                 }
-                                Err(error) => {
-                                    logging::append_log(
-                                        "WARN",
-                                        "media.h264_encoder",
-                                        format!(
-                                            "failed to start encoder, falling back to jpeg: {}",
-                                            error
-                                        ),
-                                    );
-                                    h264_encoder = None;
-                                    h264_config_sent = false;
-                                    h264_restart_allowed_at_tick =
-                                        stream_tick.saturating_add(24);
-                                    h264_no_output_streak = 0;
-                                }
                             }
-                        }
-
-                        if !sent_frame {
-                            let encode_started_at = Instant::now();
-                            let Ok(frame) = encode_jpeg(&frame_image, stream_profile.jpeg_quality())
-                            else {
-                                break;
-                            };
-                            encode_elapsed = encode_started_at.elapsed();
-                            let packet =
-                                encode_media_packet(StreamCodec::Jpeg, MediaPacketKind::Frame, &frame);
-                            let send_started_at = Instant::now();
-                            if socket.send(Message::Binary(packet.into())).is_err() {
-                                break;
+                            Err(error) => {
+                                logging::append_log(
+                                    "WARN",
+                                    "media.vp8_encoder",
+                                    format!("failed to start encoder: {}", error),
+                                );
+                                vp8_encoder = None;
+                                vp8_config_sent = false;
+                                vp8_header_buffer.clear();
                             }
-                            send_elapsed = send_started_at.elapsed();
-                            path_label = "jpeg";
-                            packets_produced = 1;
-                            sent_frame = true;
                         }
 
                         if sent_frame {
                             last_sent_tick = stream_tick;
+                        } else {
+                            path_label = "vp8-wait";
                         }
 
                         let sleep_duration = if is_active {
@@ -750,7 +475,7 @@ pub fn spawn_stream(
                             stream_profile.idle_frame_delay()
                         };
                         perf_log_frame_index = perf_log_frame_index.saturating_add(1);
-                        if sent_frame && (perf_log_frame_index <= 5 || perf_log_frame_index % 60 == 0) {
+                        if perf_log_frame_index <= 5 || perf_log_frame_index % 60 == 0 {
                             logging::append_log(
                                 "INFO",
                                 "media.perf",
@@ -782,21 +507,6 @@ pub fn spawn_stream(
             }
         }
     });
-}
-
-fn encode_jpeg(image: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    let mut cursor = Cursor::new(&mut bytes);
-    let encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
-    encoder
-        .write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            ColorType::Rgba8.into(),
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(bytes)
 }
 
 fn frame_signature(bytes: &[u8]) -> Vec<u8> {
@@ -832,9 +542,9 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
     .map_err(|error| error.to_string())
 }
 
-#[cfg(not(windows))]
 pub fn ffmpeg_executable_path() -> PathBuf {
-    if let Ok(current_exe) = env::current_exe()
+    if cfg!(windows)
+        && let Ok(current_exe) = env::current_exe()
         && let Some(parent) = current_exe.parent()
     {
         let bundled = parent.join("ffmpeg.exe");
@@ -843,81 +553,30 @@ pub fn ffmpeg_executable_path() -> PathBuf {
         }
     }
 
-    PathBuf::from("ffmpeg")
+    PathBuf::from(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })
 }
 
-#[cfg(not(windows))]
-fn ensure_h264_encoder(
-    encoder: &mut Option<H264EncoderSession>,
-    disabled_flavors: &[H264EncoderFlavor],
+fn ensure_vp8_encoder(
+    encoder: &mut Option<Vp8EncoderSession>,
     width: u32,
     height: u32,
     profile: StreamProfile,
 ) -> Result<(), String> {
     let needs_restart = encoder
         .as_ref()
-        .map(|active| !active.matches(width, height))
+        .map(|active| !active.matches(width, height, profile))
         .unwrap_or(true);
 
     if !needs_restart {
         return Ok(());
     }
 
-    let mut last_error = None;
-    for flavor in h264_encoder_candidates()
-        .into_iter()
-        .filter(|candidate| !disabled_flavors.contains(candidate))
-    {
-        match H264EncoderSession::new(width, height, profile, flavor) {
-            Ok(session) => {
-                *encoder = Some(session);
-                return Ok(());
-            }
-            Err(error) => {
-                logging::append_log(
-                    "WARN",
-                    "media.h264_encoder",
-                    format!("failed to start encoder {}: {}", flavor.label(), error),
-                );
-                last_error = Some(format!("{}: {}", flavor.label(), error));
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| "no available h264 encoders after fallback attempts".to_owned()))
-}
-
-#[cfg(windows)]
-fn ensure_h264_encoder(
-    encoder: &mut Option<H264EncoderSession>,
-    _disabled_flavors: &[()],
-    width: u32,
-    height: u32,
-    profile: StreamProfile,
-) -> Result<(), String> {
-    let needs_restart = encoder
-        .as_ref()
-        .map(|active| !active.matches(width, height))
-        .unwrap_or(true);
-
-    if !needs_restart {
-        return Ok(());
-    }
-
-    match H264EncoderSession::new(width, height, profile) {
+    match Vp8EncoderSession::new(width, height, profile) {
         Ok(session) => {
             *encoder = Some(session);
             Ok(())
         }
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-#[cfg(not(windows))]
-fn configure_hidden_process(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        _command.creation_flags(CREATE_NO_WINDOW);
+        Err(error) => Err(error),
     }
 }
 

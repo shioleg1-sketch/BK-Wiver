@@ -1,16 +1,17 @@
 use std::{
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    env,
+    io::{Read, Write},
+    path::PathBuf,
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use crossbeam_channel::Sender;
-use openh264::{
-    NalParser,
-    decoder::Decoder,
-    formats::YUVSource,
-};
-use serde::Deserialize;
 use tungstenite::{Message, connect};
 use url::Url;
 
@@ -18,11 +19,11 @@ use crate::logging;
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
+const IVF_HEADER_LEN: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
-    Jpeg,
-    H264,
+    Vp8,
 }
 
 #[derive(Clone)]
@@ -44,81 +45,106 @@ enum MediaPacketKind {
     Frame,
 }
 
-struct H264DecoderSession {
-    decoder: Decoder,
-    parser: NalParser,
-    session_id: String,
-    event_tx: Sender<MediaEvent>,
-    decoded_frame_count: u64,
+struct Vp8DecoderSession {
+    child: Child,
+    stdin: ChildStdin,
 }
 
-#[derive(Clone, Copy, Deserialize)]
-struct H264Config {
-    width: u32,
-    height: u32,
-}
-
-impl H264DecoderSession {
+impl Vp8DecoderSession {
     fn new(
         width: u32,
         height: u32,
         session_id: String,
         event_tx: Sender<MediaEvent>,
     ) -> Result<Self, String> {
+        let ffmpeg = ffmpeg_executable_path();
         logging::append_log(
             "INFO",
-            "media.h264_decoder",
+            "media.vp8_decoder",
             format!(
-                "starting decoder=openh264 width={} height={} session_id={}",
+                "starting decoder=ffmpeg path={} width={} height={} session_id={}",
+                ffmpeg.display(),
                 width,
                 height,
                 session_id
             ),
         );
-        Ok(Self {
-            decoder: Decoder::new().map_err(|error| error.to_string())?,
-            parser: NalParser::new(),
-            session_id,
-            event_tx,
-            decoded_frame_count: 0,
-        })
-    }
 
-    fn push_packet(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.parser.feed(bytes);
-        while let Some(nal) = self.parser.next() {
-            match self.decoder.decode(&nal) {
-                Ok(Some(yuv)) => {
-                    let (width, height) = yuv.dimensions();
-                    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-                    yuv.write_rgba8(&mut rgba);
-                    self.decoded_frame_count = self.decoded_frame_count.saturating_add(1);
-                    if self.decoded_frame_count == 1 || self.decoded_frame_count % 120 == 0 {
-                        logging::append_log(
-                            "INFO",
-                            "media.h264_decoder",
-                            format!("decoded_frames={}", self.decoded_frame_count),
-                        );
-                    }
-                    let _ = self.event_tx.send(MediaEvent::Frame {
-                        session_id: self.session_id.clone(),
-                        codec: MediaCodec::H264,
-                        bytes: rgba,
-                        width: Some(width as u32),
-                        height: Some(height as u32),
-                    });
-                }
-                Ok(None) => {}
-                Err(error) => {
+        let mut command = Command::new(ffmpeg);
+        command
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-fflags")
+            .arg("nobuffer")
+            .arg("-probesize")
+            .arg("32")
+            .arg("-analyzeduration")
+            .arg("0")
+            .arg("-f")
+            .arg("ivf")
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-an")
+            .arg("-sn")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgba")
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "ffmpeg stdin is not available".to_owned())?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "ffmpeg stdout is not available".to_owned())?;
+
+        let frame_size = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        thread::spawn(move || {
+            let mut decoded_frame_count = 0_u64;
+            let mut frame = vec![0_u8; frame_size];
+            while stdout.read_exact(&mut frame).is_ok() {
+                decoded_frame_count = decoded_frame_count.saturating_add(1);
+                if decoded_frame_count == 1 || decoded_frame_count % 120 == 0 {
                     logging::append_log(
-                        "WARN",
-                        "media.h264_decoder",
-                        format!("openh264 decode error: {}", error),
+                        "INFO",
+                        "media.vp8_decoder",
+                        format!("decoded_frames={}", decoded_frame_count),
                     );
                 }
+                let _ = event_tx.send(MediaEvent::Frame {
+                    session_id: session_id.clone(),
+                    codec: MediaCodec::Vp8,
+                    bytes: frame.clone(),
+                    width: Some(width),
+                    height: Some(height),
+                });
             }
-        }
-        Ok(())
+        });
+
+        Ok(Self { child, stdin })
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.stdin
+            .write_all(bytes)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl Drop for Vp8DecoderSession {
+    fn drop(&mut self) {
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -140,8 +166,7 @@ pub fn spawn_listener(
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
-                    let mut h264_decoder: Option<H264DecoderSession> = None;
-                    let mut h264_config: Option<H264Config> = None;
+                    let mut vp8_decoder: Option<Vp8DecoderSession> = None;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -158,66 +183,72 @@ pub fn spawn_listener(
                                     decode_media_packet(bytes.as_ref())
                                 {
                                     match (codec, kind) {
-                                        (MediaCodec::Jpeg, MediaPacketKind::Frame) => {
-                                            logging::append_log(
-                                                "DEBUG",
-                                                "media.jpeg",
-                                                format!("jpeg frame session_id={}", session_id),
-                                            );
-                                            let _ = event_tx.send(MediaEvent::Frame {
-                                                session_id: session_id.clone(),
-                                                codec,
-                                                bytes: payload,
-                                                width: None,
-                                                height: None,
-                                            });
-                                        }
-                                        (MediaCodec::H264, MediaPacketKind::Config) => {
-                                            if let Ok(config) =
-                                                serde_json::from_slice::<H264Config>(&payload)
-                                            {
-                                                h264_config = Some(config);
+                                        (MediaCodec::Vp8, MediaPacketKind::Config) => {
+                                            let Some((width, height)) = parse_ivf_dimensions(&payload)
+                                            else {
                                                 logging::append_log(
-                                                    "INFO",
-                                                    "media.h264_decoder",
+                                                    "WARN",
+                                                    "media.vp8_decoder",
                                                     format!(
-                                                        "config received session_id={} width={} height={}",
-                                                        session_id, config.width, config.height
+                                                        "invalid ivf header session_id={} bytes={}",
+                                                        session_id,
+                                                        payload.len()
                                                     ),
                                                 );
-                                                h264_decoder = ensure_h264_decoder(
-                                                    config.width,
-                                                    config.height,
-                                                    session_id.clone(),
-                                                    event_tx.clone(),
-                                                )
-                                                .ok();
-                                            }
-                                        }
-                                        (MediaCodec::H264, MediaPacketKind::Frame) => {
-                                            if h264_decoder.is_none()
-                                                && let Some(config) = h264_config
-                                            {
-                                                h264_decoder = ensure_h264_decoder(
-                                                    config.width,
-                                                    config.height,
-                                                    session_id.clone(),
-                                                    event_tx.clone(),
-                                                )
-                                                .ok();
-                                            }
-                                            if let Some(decoder) = &mut h264_decoder {
-                                                if let Err(error) = decoder.push_packet(&payload) {
+                                                continue;
+                                            };
+                                            logging::append_log(
+                                                "INFO",
+                                                "media.vp8_decoder",
+                                                format!(
+                                                    "config received session_id={} width={} height={}",
+                                                    session_id, width, height
+                                                ),
+                                            );
+                                            match Vp8DecoderSession::new(
+                                                width,
+                                                height,
+                                                session_id.clone(),
+                                                event_tx.clone(),
+                                            ) {
+                                                Ok(mut decoder) => {
+                                                    if let Err(error) = decoder.push_bytes(&payload) {
+                                                        logging::append_log(
+                                                            "ERROR",
+                                                            "media.vp8_decoder",
+                                                            format!(
+                                                                "failed to push ivf header: {}",
+                                                                error
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        vp8_decoder = Some(decoder);
+                                                    }
+                                                }
+                                                Err(error) => {
                                                     logging::append_log(
                                                         "ERROR",
-                                                        "media.h264_decoder",
-                                                        format!("packet decode failed: {}", error),
+                                                        "media.vp8_decoder",
+                                                        format!(
+                                                            "failed to start decoder: {}",
+                                                            error
+                                                        ),
                                                     );
-                                                    h264_decoder = None;
                                                 }
                                             }
                                         }
-                                        _ => {}
+                                        (MediaCodec::Vp8, MediaPacketKind::Frame) => {
+                                            if let Some(decoder) = &mut vp8_decoder {
+                                                if let Err(error) = decoder.push_bytes(&payload) {
+                                                    logging::append_log(
+                                                        "ERROR",
+                                                        "media.vp8_decoder",
+                                                        format!("packet decode failed: {}", error),
+                                                    );
+                                                    vp8_decoder = None;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -277,16 +308,12 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
 }
 
 fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec<u8>)> {
-    if bytes.len() < MEDIA_PACKET_HEADER_LEN {
-        return Some((MediaCodec::Jpeg, MediaPacketKind::Frame, bytes.to_vec()));
-    }
-    if &bytes[..4] != MEDIA_PACKET_MAGIC {
-        return Some((MediaCodec::Jpeg, MediaPacketKind::Frame, bytes.to_vec()));
+    if bytes.len() < MEDIA_PACKET_HEADER_LEN || &bytes[..4] != MEDIA_PACKET_MAGIC {
+        return None;
     }
 
     let codec = match bytes[5] {
-        1 => MediaCodec::Jpeg,
-        2 => MediaCodec::H264,
+        1 => MediaCodec::Vp8,
         _ => return None,
     };
     let kind = match bytes[6] {
@@ -298,11 +325,25 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     Some((codec, kind, bytes[MEDIA_PACKET_HEADER_LEN..].to_vec()))
 }
 
-fn ensure_h264_decoder(
-    width: u32,
-    height: u32,
-    session_id: String,
-    event_tx: Sender<MediaEvent>,
-) -> Result<H264DecoderSession, String> {
-    H264DecoderSession::new(width, height, session_id, event_tx)
+fn parse_ivf_dimensions(header: &[u8]) -> Option<(u32, u32)> {
+    if header.len() < IVF_HEADER_LEN || &header[..4] != b"DKIF" || &header[8..12] != b"VP80" {
+        return None;
+    }
+    let width = u16::from_le_bytes([header[12], header[13]]) as u32;
+    let height = u16::from_le_bytes([header[14], header[15]]) as u32;
+    Some((width, height))
+}
+
+fn ffmpeg_executable_path() -> PathBuf {
+    if cfg!(windows)
+        && let Ok(current_exe) = env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let bundled = parent.join("ffmpeg.exe");
+        if bundled.exists() {
+            return bundled;
+        }
+    }
+
+    PathBuf::from(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })
 }
