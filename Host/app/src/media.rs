@@ -20,6 +20,7 @@ const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
 const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
 const IVF_HEADER_LEN: usize = 32;
+const IVF_FRAME_HEADER_LEN: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
@@ -222,16 +223,37 @@ impl Vp8EncoderSession {
         let (packet_tx, packet_rx) = std::sync::mpsc::channel();
 
         thread::spawn(move || {
-            let mut buffer = [0_u8; 8192];
+            let mut ivf_header = vec![0_u8; IVF_HEADER_LEN];
+            if stdout.read_exact(&mut ivf_header).is_err() {
+                return;
+            }
+            if packet_tx.send(ivf_header).is_err() {
+                return;
+            }
+
             loop {
-                match stdout.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if packet_tx.send(buffer[..read].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+                let mut frame_header = [0_u8; IVF_FRAME_HEADER_LEN];
+                if stdout.read_exact(&mut frame_header).is_err() {
+                    break;
+                }
+
+                let frame_len = u32::from_le_bytes([
+                    frame_header[0],
+                    frame_header[1],
+                    frame_header[2],
+                    frame_header[3],
+                ]) as usize;
+                let mut packet = Vec::with_capacity(IVF_FRAME_HEADER_LEN + frame_len);
+                packet.extend_from_slice(&frame_header);
+
+                let mut frame_payload = vec![0_u8; frame_len];
+                if stdout.read_exact(&mut frame_payload).is_err() {
+                    break;
+                }
+                packet.extend_from_slice(&frame_payload);
+
+                if packet_tx.send(packet).is_err() {
+                    break;
                 }
             }
         });

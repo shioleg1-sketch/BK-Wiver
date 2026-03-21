@@ -11,6 +11,7 @@ DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 ICONSET_DIR="$TMP_DIR/app.iconset"
 PLIST_SOURCE="$ROOT_DIR/ConsolMac/installer/macos/Info.plist"
 BIN_SOURCE="$ROOT_DIR/target/release/bk-wiver-console-macos"
+FFMPEG_SOURCE="$(command -v ffmpeg || true)"
 
 rm -rf "$TMP_DIR" "$APP_DIR" "$DMG_PATH"
 mkdir -p "$TMP_DIR" "$DIST_DIR"
@@ -22,6 +23,13 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$PLIST_SOURCE" "$APP_DIR/Contents/Info.plist"
 cp "$BIN_SOURCE" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+
+if [[ -n "$FFMPEG_SOURCE" ]]; then
+  cp -L "$FFMPEG_SOURCE" "$APP_DIR/Contents/Resources/ffmpeg"
+  chmod +x "$APP_DIR/Contents/Resources/ffmpeg"
+else
+  echo "Warning: ffmpeg not found in PATH, macOS app will rely on runtime PATH lookup"
+fi
 
 mkdir -p "$ICONSET_DIR"
 LOGO_SOURCE="$ROOT_DIR/branding/logo.png"

@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
@@ -93,7 +93,7 @@ impl Vp8DecoderSession {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         let mut child = command.spawn().map_err(|error| error.to_string())?;
         let stdin = child
@@ -104,29 +104,79 @@ impl Vp8DecoderSession {
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg stdout is not available".to_owned())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "ffmpeg stderr is not available".to_owned())?;
 
         let frame_size = (width as usize)
             .saturating_mul(height as usize)
             .saturating_mul(4);
+        let session_id_for_stdout = session_id.clone();
         thread::spawn(move || {
             let mut decoded_frame_count = 0_u64;
             let mut frame = vec![0_u8; frame_size];
-            while stdout.read_exact(&mut frame).is_ok() {
-                decoded_frame_count = decoded_frame_count.saturating_add(1);
-                if decoded_frame_count == 1 || decoded_frame_count % 120 == 0 {
-                    logging::append_log(
-                        "INFO",
-                        "media.vp8_decoder",
-                        format!("decoded_frames={}", decoded_frame_count),
-                    );
+            loop {
+                match stdout.read_exact(&mut frame) {
+                    Ok(()) => {
+                        decoded_frame_count = decoded_frame_count.saturating_add(1);
+                        if decoded_frame_count == 1 || decoded_frame_count % 120 == 0 {
+                            logging::append_log(
+                                "INFO",
+                                "media.vp8_decoder",
+                                format!(
+                                    "decoded_frames={} session_id={}",
+                                    decoded_frame_count, session_id_for_stdout
+                                ),
+                            );
+                        }
+                        let _ = event_tx.send(MediaEvent::Frame {
+                            session_id: session_id_for_stdout.clone(),
+                            codec: MediaCodec::Vp8,
+                            bytes: frame.clone(),
+                            width: Some(width),
+                            height: Some(height),
+                        });
+                    }
+                    Err(error) => {
+                        logging::append_log(
+                            "WARN",
+                            "media.vp8_decoder",
+                            format!(
+                                "decoder stdout ended session_id={} decoded_frames={} error={}",
+                                session_id_for_stdout, decoded_frame_count, error
+                            ),
+                        );
+                        break;
+                    }
                 }
-                let _ = event_tx.send(MediaEvent::Frame {
-                    session_id: session_id.clone(),
-                    codec: MediaCodec::Vp8,
-                    bytes: frame.clone(),
-                    width: Some(width),
-                    height: Some(height),
-                });
+            }
+        });
+        let session_id_for_stderr = session_id.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) if !line.trim().is_empty() => {
+                        logging::append_log(
+                            "WARN",
+                            "media.vp8_decoder",
+                            format!("ffmpeg stderr session_id={} {}", session_id_for_stderr, line),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        logging::append_log(
+                            "WARN",
+                            "media.vp8_decoder",
+                            format!(
+                                "stderr read failed session_id={} error={}",
+                                session_id_for_stderr, error
+                            ),
+                        );
+                        break;
+                    }
+                }
             }
         });
 
@@ -167,6 +217,7 @@ pub fn spawn_listener(
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     let mut vp8_decoder: Option<Vp8DecoderSession> = None;
+                    let mut vp8_frame_packet_count = 0_u64;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -238,6 +289,22 @@ pub fn spawn_listener(
                                             }
                                         }
                                         (MediaCodec::Vp8, MediaPacketKind::Frame) => {
+                                            vp8_frame_packet_count =
+                                                vp8_frame_packet_count.saturating_add(1);
+                                            if vp8_frame_packet_count == 1
+                                                || vp8_frame_packet_count % 120 == 0
+                                            {
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.vp8_decoder",
+                                                    format!(
+                                                        "frame packets received={} session_id={} bytes={}",
+                                                        vp8_frame_packet_count,
+                                                        session_id,
+                                                        payload.len()
+                                                    ),
+                                                );
+                                            }
                                             if let Some(decoder) = &mut vp8_decoder {
                                                 if let Err(error) = decoder.push_bytes(&payload) {
                                                     logging::append_log(
@@ -335,13 +402,25 @@ fn parse_ivf_dimensions(header: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn ffmpeg_executable_path() -> PathBuf {
-    if cfg!(windows)
-        && let Ok(current_exe) = env::current_exe()
+    if let Ok(current_exe) = env::current_exe()
         && let Some(parent) = current_exe.parent()
     {
-        let bundled = parent.join("ffmpeg.exe");
-        if bundled.exists() {
-            return bundled;
+        if cfg!(windows) {
+            let bundled = parent.join("ffmpeg.exe");
+            if bundled.exists() {
+                return bundled;
+            }
+        } else if cfg!(target_os = "macos") {
+            let bundled_near_exe = parent.join("ffmpeg");
+            if bundled_near_exe.exists() {
+                return bundled_near_exe;
+            }
+            if let Some(contents_dir) = parent.parent() {
+                let bundled_in_resources = contents_dir.join("Resources").join("ffmpeg");
+                if bundled_in_resources.exists() {
+                    return bundled_in_resources;
+                }
+            }
         }
     }
 
