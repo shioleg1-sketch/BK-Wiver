@@ -1,33 +1,27 @@
 use std::{
-    env,
     fs::File,
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver},
-    },
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
     thread,
     time::Duration,
 };
 
 use crossbeam_channel::Sender;
+use openh264::{
+    NalParser,
+    decoder::Decoder,
+    formats::YUVSource,
+};
 use serde::Deserialize;
 use tungstenite::{Message, connect};
 use url::Url;
 
 use crate::logging;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
 const H264_DUMP_LIMIT_BYTES: usize = 256 * 1024;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
@@ -55,11 +49,12 @@ enum MediaPacketKind {
 }
 
 struct H264DecoderSession {
-    child: Child,
-    stdin: ChildStdin,
-    flavor: H264DecoderFlavor,
-    exit_rx: Receiver<()>,
-    packet_write_count: Arc<AtomicU64>,
+    decoder: Decoder,
+    parser: NalParser,
+    session_id: String,
+    event_tx: Sender<MediaEvent>,
+    packet_write_count: u64,
+    decoded_frame_count: u64,
 }
 
 struct H264DumpSession {
@@ -131,275 +126,80 @@ struct H264Config {
     height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum H264DecoderFlavor {
-    #[cfg(windows)]
-    D3d11va,
-    #[cfg(windows)]
-    Dxva2,
-    #[cfg(windows)]
-    Qsv,
-    #[cfg(target_os = "macos")]
-    VideoToolbox,
-    Software,
-}
-
-impl H264DecoderFlavor {
-    fn label(self) -> &'static str {
-        match self {
-            #[cfg(windows)]
-            Self::D3d11va => "d3d11va",
-            #[cfg(windows)]
-            Self::Dxva2 => "dxva2",
-            #[cfg(windows)]
-            Self::Qsv => "qsv",
-            #[cfg(target_os = "macos")]
-            Self::VideoToolbox => "videotoolbox",
-            Self::Software => "software",
-        }
-    }
-
-    fn append_ffmpeg_args(self, command: &mut Command) {
-        match self {
-            #[cfg(windows)]
-            Self::D3d11va => {
-                command
-                    .arg("-hwaccel")
-                    .arg("d3d11va")
-                    .arg("-hwaccel_output_format")
-                    .arg("d3d11");
-            }
-            #[cfg(windows)]
-            Self::Dxva2 => {
-                command
-                    .arg("-hwaccel")
-                    .arg("dxva2")
-                    .arg("-hwaccel_output_format")
-                    .arg("dxva2_vld");
-            }
-            #[cfg(windows)]
-            Self::Qsv => {
-                command
-                    .arg("-hwaccel")
-                    .arg("qsv")
-                    .arg("-c:v")
-                    .arg("h264_qsv");
-            }
-            #[cfg(target_os = "macos")]
-            Self::VideoToolbox => {
-                command.arg("-hwaccel").arg("videotoolbox");
-            }
-            Self::Software => {}
-        }
-    }
-}
-
-fn h264_decoder_candidates() -> Vec<H264DecoderFlavor> {
-    let mut candidates = Vec::new();
-    #[cfg(windows)]
-    {
-        candidates.push(H264DecoderFlavor::D3d11va);
-        candidates.push(H264DecoderFlavor::Dxva2);
-        candidates.push(H264DecoderFlavor::Qsv);
-        candidates.push(H264DecoderFlavor::Software);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        candidates.push(H264DecoderFlavor::Software);
-        candidates.push(H264DecoderFlavor::VideoToolbox);
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    candidates.push(H264DecoderFlavor::Software);
-    candidates
-}
-
 impl H264DecoderSession {
     fn new(
         width: u32,
         height: u32,
         session_id: String,
         event_tx: Sender<MediaEvent>,
-        flavor: H264DecoderFlavor,
     ) -> Result<Self, String> {
-        let ffmpeg = ffmpeg_executable_path();
         logging::append_log(
             "INFO",
             "media.h264_decoder",
             format!(
-                "starting ffmpeg={} decoder={} width={} height={} session_id={}",
-                ffmpeg.display(),
-                flavor.label(),
+                "starting decoder=openh264 width={} height={} session_id={}",
                 width,
                 height,
                 session_id
             ),
         );
-        let mut command = Command::new(ffmpeg);
-        command
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-fflags")
-            .arg("nobuffer")
-            .arg("-flags")
-            .arg("low_delay");
-        flavor.append_ffmpeg_args(&mut command);
-        command
-            .arg("-f")
-            .arg("h264")
-            .arg("-i")
-            .arg("pipe:0")
-            .arg("-f")
-            .arg("rawvideo")
-            .arg("-pix_fmt")
-            .arg("rgba")
-            .arg("pipe:1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        configure_hidden_process(&mut command);
-        let mut child = command.spawn().map_err(|error| error.to_string())?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "ffmpeg decoder stdin is not available".to_owned())?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "ffmpeg decoder stdout is not available".to_owned())?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "ffmpeg decoder stderr is not available".to_owned())?;
-        let (exit_tx, exit_rx) = mpsc::channel();
-        let (stderr_tx, stderr_rx) = mpsc::channel();
-        let packet_write_count = Arc::new(AtomicU64::new(0));
-        let decoded_frame_count = Arc::new(AtomicU64::new(0));
-
-        thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer);
-            let stderr_text = String::from_utf8_lossy(&buffer).trim().to_owned();
-            let _ = stderr_tx.send(stderr_text);
-        });
-
-        let watchdog_packet_write_count = packet_write_count.clone();
-        let watchdog_decoded_frame_count = decoded_frame_count.clone();
-        let watchdog_session_id = session_id.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(2));
-            let written = watchdog_packet_write_count.load(Ordering::Relaxed);
-            let decoded = watchdog_decoded_frame_count.load(Ordering::Relaxed);
-            if decoded == 0 {
-                logging::append_log(
-                    "WARN",
-                    "media.h264_decoder",
-                    format!(
-                        "no decoded frame after startup session_id={} decoder={} packets_written={} decoded_frames={}",
-                        watchdog_session_id,
-                        flavor.label(),
-                        written,
-                        decoded
-                    ),
-                );
-            }
-        });
-
-        let reader_decoded_frame_count = decoded_frame_count.clone();
-        thread::spawn(move || {
-            let frame_len = (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4);
-            let mut frame = vec![0_u8; frame_len];
-            let mut frame_count = 0_u64;
-
-            loop {
-                if stdout.read_exact(&mut frame).is_err() {
-                    let stderr_text = stderr_rx.try_recv().unwrap_or_default();
-                    logging::append_log(
-                        "WARN",
-                        "media.h264_decoder",
-                        if stderr_text.is_empty() {
-                            "decoder stdout ended or frame read failed".to_owned()
-                        } else {
-                            format!(
-                                "decoder stdout ended or frame read failed: {}",
-                                stderr_text
-                            )
-                        },
-                    );
-                    break;
-                }
-                frame_count = frame_count.saturating_add(1);
-                reader_decoded_frame_count.store(frame_count, Ordering::Relaxed);
-                if frame_count == 1 || frame_count % 120 == 0 {
-                    logging::append_log(
-                        "INFO",
-                        "media.h264_decoder",
-                        format!("decoded_frames={}", frame_count),
-                    );
-                }
-                let _ = event_tx.send(MediaEvent::Frame {
-                    session_id: session_id.clone(),
-                    codec: MediaCodec::H264,
-                    bytes: frame.clone(),
-                    width: Some(width),
-                    height: Some(height),
-                });
-            }
-            let _ = exit_tx.send(());
-        });
-
         Ok(Self {
-            child,
-            stdin,
-            flavor,
-            exit_rx,
-            packet_write_count,
+            decoder: Decoder::new().map_err(|error| error.to_string())?,
+            parser: NalParser::new(),
+            session_id,
+            event_tx,
+            packet_write_count: 0,
+            decoded_frame_count: 0,
         })
     }
 
     fn push_packet(&mut self, bytes: &[u8]) -> Result<(), String> {
-        if self.exit_rx.try_recv().is_ok() {
-            return Err(format!("decoder {} exited", self.flavor.label()));
-        }
-        if let Some(status) = self.child.try_wait().map_err(|error| error.to_string())? {
-            return Err(format!(
-                "decoder {} exited early with status {}",
-                self.flavor.label(),
-                status
-            ));
-        }
-        self.stdin.write_all(bytes).map_err(|error| error.to_string())?;
-        let packet_write_count = self
-            .packet_write_count
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        if packet_write_count <= 5 || packet_write_count % 120 == 0 {
+        self.packet_write_count = self.packet_write_count.saturating_add(1);
+        if self.packet_write_count <= 5 || self.packet_write_count % 120 == 0 {
             logging::append_log(
                 "INFO",
                 "media.h264_decoder",
                 format!(
-                    "packet written decoder={} bytes={} count={}",
-                    self.flavor.label(),
+                    "packet decoded_by=openh264 bytes={} count={}",
                     bytes.len(),
-                    packet_write_count
+                    self.packet_write_count
                 ),
             );
         }
+        self.parser.feed(bytes);
+        while let Some(nal) = self.parser.next() {
+            match self.decoder.decode(&nal) {
+                Ok(Some(yuv)) => {
+                    let (width, height) = yuv.dimensions();
+                    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+                    yuv.write_rgba8(&mut rgba);
+                    self.decoded_frame_count = self.decoded_frame_count.saturating_add(1);
+                    if self.decoded_frame_count == 1 || self.decoded_frame_count % 120 == 0 {
+                        logging::append_log(
+                            "INFO",
+                            "media.h264_decoder",
+                            format!("decoded_frames={}", self.decoded_frame_count),
+                        );
+                    }
+                    let _ = self.event_tx.send(MediaEvent::Frame {
+                        session_id: self.session_id.clone(),
+                        codec: MediaCodec::H264,
+                        bytes: rgba,
+                        width: Some(width as u32),
+                        height: Some(height as u32),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "media.h264_decoder",
+                        format!("openh264 decode error: {}", error),
+                    );
+                }
+            }
+        }
         Ok(())
-    }
-
-    fn flavor(&self) -> H264DecoderFlavor {
-        self.flavor
-    }
-}
-
-impl Drop for H264DecoderSession {
-    fn drop(&mut self) {
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -424,7 +224,6 @@ pub fn spawn_listener(
                     let mut h264_decoder: Option<H264DecoderSession> = None;
                     let mut h264_dump: Option<H264DumpSession> = None;
                     let mut h264_config: Option<H264Config> = None;
-                    let mut h264_disabled_flavors: Vec<H264DecoderFlavor> = Vec::new();
                     let mut h264_packet_count = 0_u64;
                     logging::append_log(
                         "INFO",
@@ -471,7 +270,6 @@ pub fn spawn_listener(
                                                     ),
                                                 );
                                                 h264_decoder = ensure_h264_decoder(
-                                                    &h264_disabled_flavors,
                                                     config.width,
                                                     config.height,
                                                     session_id.clone(),
@@ -503,7 +301,6 @@ pub fn spawn_listener(
                                                 && let Some(config) = h264_config
                                             {
                                                 h264_decoder = ensure_h264_decoder(
-                                                    &h264_disabled_flavors,
                                                     config.width,
                                                     config.height,
                                                     session_id.clone(),
@@ -516,13 +313,8 @@ pub fn spawn_listener(
                                                     logging::append_log(
                                                         "ERROR",
                                                         "media.h264_decoder",
-                                                        format!(
-                                                            "packet write failed on {}: {}",
-                                                            decoder.flavor().label(),
-                                                            error
-                                                        ),
+                                                        format!("packet decode failed: {}", error),
                                                     );
-                                                    h264_disabled_flavors.push(decoder.flavor());
                                                     h264_decoder = None;
                                                 }
                                             } else if h264_config.is_some() {
@@ -618,62 +410,11 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     Some((codec, kind, bytes[MEDIA_PACKET_HEADER_LEN..].to_vec()))
 }
 
-fn ffmpeg_executable_path() -> PathBuf {
-    if let Ok(current_exe) = env::current_exe()
-        && let Some(parent) = current_exe.parent()
-    {
-        let bundled = parent.join("ffmpeg");
-        if bundled.exists() {
-            return bundled;
-        }
-        let bundled_exe = parent.join("ffmpeg.exe");
-        if bundled_exe.exists() {
-            return bundled_exe;
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return path;
-        }
-    }
-
-    PathBuf::from("ffmpeg")
-}
-
 fn ensure_h264_decoder(
-    disabled_flavors: &[H264DecoderFlavor],
     width: u32,
     height: u32,
     session_id: String,
     event_tx: Sender<MediaEvent>,
 ) -> Result<H264DecoderSession, String> {
-    let mut last_error = None;
-    for flavor in h264_decoder_candidates()
-        .into_iter()
-        .filter(|candidate| !disabled_flavors.contains(candidate))
-    {
-        match H264DecoderSession::new(width, height, session_id.clone(), event_tx.clone(), flavor) {
-            Ok(session) => return Ok(session),
-            Err(error) => {
-                logging::append_log(
-                    "WARN",
-                    "media.h264_decoder",
-                    format!("failed to start decoder {}: {}", flavor.label(), error),
-                );
-                last_error = Some(format!("{}: {}", flavor.label(), error));
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| "no available h264 decoders after fallback attempts".to_owned()))
-}
-
-fn configure_hidden_process(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        _command.creation_flags(CREATE_NO_WINDOW);
-    }
+    H264DecoderSession::new(width, height, session_id, event_tx)
 }
