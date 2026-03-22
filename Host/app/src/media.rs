@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use image::{DynamicImage, codecs::jpeg::JpegEncoder};
 use tungstenite::{Message, connect};
 use url::Url;
 
@@ -26,17 +27,22 @@ const VP8_FRAME_CHUNK_DATA_LEN: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
+    Jpeg,
     Vp8,
 }
 
 impl StreamCodec {
-    pub fn from_wire(_value: &str) -> Self {
-        Self::Vp8
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "vp8" => Self::Vp8,
+            _ => Self::Jpeg,
+        }
     }
 
     fn code(self) -> u8 {
         match self {
-            Self::Vp8 => 1,
+            Self::Jpeg => 1,
+            Self::Vp8 => 2,
         }
     }
 }
@@ -133,6 +139,14 @@ impl StreamProfile {
             Self::Fast => "8",
             Self::Balanced => "6",
             Self::Sharp => "5",
+        }
+    }
+
+    fn target_jpeg_quality(self) -> u8 {
+        match self {
+            Self::Fast => 55,
+            Self::Balanced => 65,
+            Self::Sharp => 75,
         }
     }
 }
@@ -299,7 +313,7 @@ pub fn spawn_stream(
     session_id: String,
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<StreamProfile>>,
-    _codec_preference: Arc<Mutex<StreamCodec>>,
+    codec_preference: Arc<Mutex<StreamCodec>>,
 ) {
     thread::spawn(move || {
         let Ok(url) = media_url(&server_url, &token, &session_id) else {
@@ -325,6 +339,10 @@ pub fn spawn_stream(
                         stream_tick = stream_tick.saturating_add(1);
                         let stream_profile =
                             profile.lock().map(|guard| *guard).unwrap_or(StreamProfile::Balanced);
+                        let stream_codec = codec_preference
+                            .lock()
+                            .map(|guard| *guard)
+                            .unwrap_or(StreamCodec::Jpeg);
 
                         let capture_started_at = Instant::now();
                         let captured =
@@ -348,63 +366,112 @@ pub fn spawn_stream(
                             .unwrap_or(true);
                         previous_signature = Some(signature);
                         let mut sent_frame = false;
-                        let mut path_label = "vp8";
+                        let mut path_label = match stream_codec {
+                            StreamCodec::Jpeg => "jpeg",
+                            StreamCodec::Vp8 => "vp8",
+                        };
                         let mut encode_elapsed = Duration::ZERO;
                         let mut send_elapsed = Duration::ZERO;
                         let mut packets_produced = 0_usize;
 
-                        match ensure_vp8_encoder(
-                            &mut vp8_encoder,
-                            frame_image.width(),
-                            frame_image.height(),
-                            stream_profile,
-                        ) {
-                            Ok(()) => {
-                                if let Some(encoder) = &mut vp8_encoder {
-                                    let encode_started_at = Instant::now();
-                                    if encoder.push_frame(&frame_image).is_ok() {
+                        match stream_codec {
+                            StreamCodec::Jpeg => {
+                                vp8_encoder = None;
+                                vp8_config_sent = false;
+                                vp8_header_buffer.clear();
+                                let encode_started_at = Instant::now();
+                                match encode_jpeg_frame(&frame_image, stream_profile) {
+                                    Ok(jpeg_bytes) => {
                                         encode_elapsed = encode_started_at.elapsed();
-                                        let chunks = encoder.drain_packets();
-                                        packets_produced = chunks.len();
+                                        packets_produced = 1;
                                         let send_started_at = Instant::now();
+                                        let frame_packet = encode_media_packet(
+                                            StreamCodec::Jpeg,
+                                            MediaPacketKind::Frame,
+                                            &jpeg_bytes,
+                                        );
+                                        sent_frame = socket
+                                            .send(Message::Binary(frame_packet.into()))
+                                            .is_ok();
+                                        send_elapsed = send_started_at.elapsed();
+                                    }
+                                    Err(error) => {
+                                        logging::append_log(
+                                            "WARN",
+                                            "media.jpeg_encoder",
+                                            format!("failed to encode jpeg frame: {}", error),
+                                        );
+                                    }
+                                }
+                            }
+                            StreamCodec::Vp8 => match ensure_vp8_encoder(
+                                &mut vp8_encoder,
+                                frame_image.width(),
+                                frame_image.height(),
+                                stream_profile,
+                            ) {
+                                Ok(()) => {
+                                    if let Some(encoder) = &mut vp8_encoder {
+                                        let encode_started_at = Instant::now();
+                                        if encoder.push_frame(&frame_image).is_ok() {
+                                            encode_elapsed = encode_started_at.elapsed();
+                                            let chunks = encoder.drain_packets();
+                                            packets_produced = chunks.len();
+                                            let send_started_at = Instant::now();
 
-                                        for chunk in chunks {
-                                            if !vp8_config_sent {
-                                                vp8_header_buffer.extend_from_slice(&chunk);
-                                                if vp8_header_buffer.len() < IVF_HEADER_LEN {
-                                                    continue;
-                                                }
+                                            for chunk in chunks {
+                                                if !vp8_config_sent {
+                                                    vp8_header_buffer.extend_from_slice(&chunk);
+                                                    if vp8_header_buffer.len() < IVF_HEADER_LEN {
+                                                        continue;
+                                                    }
 
-                                                let header = vp8_header_buffer[..IVF_HEADER_LEN].to_vec();
-                                                let config_packet = encode_media_packet(
-                                                    StreamCodec::Vp8,
-                                                    MediaPacketKind::Config,
-                                                    &header,
-                                                );
-                                                if socket
-                                                    .send(Message::Binary(config_packet.into()))
-                                                    .is_err()
-                                                {
-                                                    sent_frame = false;
-                                                    break;
-                                                }
-                                                let (width, height) = encoder.dimensions();
-                                                logging::append_log(
-                                                    "INFO",
-                                                    "media.vp8_encoder",
-                                                    format!(
-                                                        "config sent encoder=libvpx width={} height={}",
-                                                        width, height
-                                                    ),
-                                                );
-                                                vp8_config_sent = true;
+                                                    let header =
+                                                        vp8_header_buffer[..IVF_HEADER_LEN].to_vec();
+                                                    let config_packet = encode_media_packet(
+                                                        StreamCodec::Vp8,
+                                                        MediaPacketKind::Config,
+                                                        &header,
+                                                    );
+                                                    if socket
+                                                        .send(Message::Binary(config_packet.into()))
+                                                        .is_err()
+                                                    {
+                                                        sent_frame = false;
+                                                        break;
+                                                    }
+                                                    let (width, height) = encoder.dimensions();
+                                                    logging::append_log(
+                                                        "INFO",
+                                                        "media.vp8_encoder",
+                                                        format!(
+                                                            "config sent encoder=libvpx width={} height={}",
+                                                            width, height
+                                                        ),
+                                                    );
+                                                    vp8_config_sent = true;
 
-                                                if vp8_header_buffer.len() > IVF_HEADER_LEN {
-                                                    let remainder =
-                                                        vp8_header_buffer[IVF_HEADER_LEN..].to_vec();
+                                                    if vp8_header_buffer.len() > IVF_HEADER_LEN {
+                                                        let remainder =
+                                                            vp8_header_buffer[IVF_HEADER_LEN..]
+                                                                .to_vec();
+                                                        if send_vp8_frame_chunks(
+                                                            &mut socket,
+                                                            &remainder,
+                                                            &mut vp8_chunks_sent,
+                                                        )
+                                                        .is_err()
+                                                        {
+                                                            sent_frame = false;
+                                                            break;
+                                                        }
+                                                        sent_frame = true;
+                                                    }
+                                                    vp8_header_buffer.clear();
+                                                } else {
                                                     if send_vp8_frame_chunks(
                                                         &mut socket,
-                                                        &remainder,
+                                                        &chunk,
                                                         &mut vp8_chunks_sent,
                                                     )
                                                     .is_err()
@@ -414,58 +481,49 @@ pub fn spawn_stream(
                                                     }
                                                     sent_frame = true;
                                                 }
-                                                vp8_header_buffer.clear();
-                                            } else {
-                                                if send_vp8_frame_chunks(
-                                                    &mut socket,
-                                                    &chunk,
-                                                    &mut vp8_chunks_sent,
-                                                )
-                                                .is_err()
-                                                {
-                                                    sent_frame = false;
-                                                    break;
-                                                }
-                                                sent_frame = true;
                                             }
-                                        }
 
-                                        if sent_frame
-                                            && (vp8_chunks_sent == 1 || vp8_chunks_sent % 120 == 0)
-                                        {
+                                            if sent_frame
+                                                && (vp8_chunks_sent == 1
+                                                    || vp8_chunks_sent % 120 == 0)
+                                            {
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.vp8_encoder",
+                                                    format!("sent_vp8_chunks={}", vp8_chunks_sent),
+                                                );
+                                            }
+                                            send_elapsed = send_started_at.elapsed();
+                                        } else {
                                             logging::append_log(
-                                                "INFO",
+                                                "WARN",
                                                 "media.vp8_encoder",
-                                                format!("sent_vp8_chunks={}", vp8_chunks_sent),
+                                                "ffmpeg stdin write failed, restarting encoder",
                                             );
+                                            vp8_encoder = None;
+                                            vp8_config_sent = false;
+                                            vp8_header_buffer.clear();
                                         }
-                                        send_elapsed = send_started_at.elapsed();
-                                    } else {
-                                        logging::append_log(
-                                            "WARN",
-                                            "media.vp8_encoder",
-                                            "ffmpeg stdin write failed, restarting encoder",
-                                        );
-                                        vp8_encoder = None;
-                                        vp8_config_sent = false;
-                                        vp8_header_buffer.clear();
                                     }
                                 }
-                            }
-                            Err(error) => {
-                                logging::append_log(
-                                    "WARN",
-                                    "media.vp8_encoder",
-                                    format!("failed to start encoder: {}", error),
-                                );
-                                vp8_encoder = None;
-                                vp8_config_sent = false;
-                                vp8_header_buffer.clear();
-                            }
+                                Err(error) => {
+                                    logging::append_log(
+                                        "WARN",
+                                        "media.vp8_encoder",
+                                        format!("failed to start encoder: {}", error),
+                                    );
+                                    vp8_encoder = None;
+                                    vp8_config_sent = false;
+                                    vp8_header_buffer.clear();
+                                }
+                            },
                         }
 
                         if !sent_frame {
-                            path_label = "vp8-wait";
+                            path_label = match stream_codec {
+                                StreamCodec::Jpeg => "jpeg-wait",
+                                StreamCodec::Vp8 => "vp8-wait",
+                            };
                         }
 
                         let sleep_duration = stream_profile.active_frame_delay();
@@ -573,6 +631,24 @@ fn ensure_vp8_encoder(
         }
         Err(error) => Err(error),
     }
+}
+
+fn encode_jpeg_frame(
+    image: &image::RgbaImage,
+    profile: StreamProfile,
+) -> Result<Vec<u8>, String> {
+    let dynamic = DynamicImage::ImageRgba8(image.clone()).into_rgb8();
+    let mut bytes = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut bytes, profile.target_jpeg_quality());
+    encoder
+        .encode(
+            dynamic.as_raw(),
+            dynamic.width(),
+            dynamic.height(),
+            image::ColorType::Rgb8,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
 }
 
 fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]) -> Vec<u8> {

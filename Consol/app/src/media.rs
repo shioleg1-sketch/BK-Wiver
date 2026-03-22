@@ -25,6 +25,7 @@ const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
+    Jpeg,
     Vp8,
 }
 
@@ -276,6 +277,33 @@ pub fn spawn_listener(
                                     decode_media_packet(bytes.as_ref())
                                 {
                                     match (codec, kind) {
+                                        (MediaCodec::Jpeg, MediaPacketKind::Config) => {}
+                                        (MediaCodec::Jpeg, MediaPacketKind::Frame) => {
+                                            match image::load_from_memory(&payload) {
+                                                Ok(image) => {
+                                                    let rgba = image.to_rgba8();
+                                                    let width = rgba.width();
+                                                    let height = rgba.height();
+                                                    let _ = event_tx.send(MediaEvent::Frame {
+                                                        session_id: session_id.clone(),
+                                                        codec: MediaCodec::Jpeg,
+                                                        bytes: rgba.into_raw(),
+                                                        width: Some(width),
+                                                        height: Some(height),
+                                                    });
+                                                }
+                                                Err(error) => {
+                                                    logging::append_log(
+                                                        "WARN",
+                                                        "media.jpeg_decoder",
+                                                        format!(
+                                                            "decode failed session_id={} error={}",
+                                                            session_id, error
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         (MediaCodec::Vp8, MediaPacketKind::Config) => {
                                             let Some((width, height)) = parse_ivf_dimensions(&payload)
                                             else {
@@ -484,7 +512,8 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     }
 
     let codec = match bytes[5] {
-        1 => MediaCodec::Vp8,
+        1 => MediaCodec::Jpeg,
+        2 => MediaCodec::Vp8,
         _ => return None,
     };
     let kind = match bytes[6] {
