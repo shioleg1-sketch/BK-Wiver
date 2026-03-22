@@ -31,16 +31,26 @@ check:
   cargo check -p bk-wiver-server
 
 check-desktop:
-  cargo check -p bk-wiver-desktop
+  cargo check -p bk-wiver-host
+  cargo check -p bk-wiver-console
 
-run-desktop:
-  cargo run -p bk-wiver-desktop
+run-host:
+  cargo run -p bk-wiver-host
 
-build-desktop-release:
-  cargo build -p bk-wiver-desktop --release
+run-console:
+  cargo run -p bk-wiver-console
 
-package-desktop-installer:
-  "C:\Users\oleg\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "deploy\windows\BK-Wiver-Desktop.iss"
+build-host-release:
+  cargo build -p bk-wiver-host --release
+
+build-console-release:
+  cargo build -p bk-wiver-console --release
+
+package-host-installer:
+  "C:\Users\oleg\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "Host\installer\windows\BK-Wiver-Host.iss"
+
+package-console-installer:
+  "C:\Users\oleg\AppData\Local\Programs\Inno Setup 6\ISCC.exe" "Consol\installer\windows\BK-Wiver-Consol.iss"
 
 fmt:
   cargo fmt

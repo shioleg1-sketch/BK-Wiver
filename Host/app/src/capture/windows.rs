@@ -29,6 +29,7 @@ pub struct WindowsCaptureEngine {
     dxgi_backend: Option<DxgiCaptureBackend>,
     gdi_backend: Option<GdiCaptureBackend>,
     screenshots_fallback: ScreenshotsCaptureBackend,
+    last_successful_frame: Option<RgbaImage>,
 }
 
 impl WindowsCaptureEngine {
@@ -64,19 +65,22 @@ impl WindowsCaptureEngine {
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
                 "windows-screenshots-fallback",
             ),
+            last_successful_frame: None,
         }
     }
 
     pub fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> CaptureFrame {
+        if self.preferred_backend == WindowsCaptureBackendKind::ScreenshotsFallback
+            && frame_index % 120 == 0
+        {
+            self.try_restore_primary_backends();
+        }
+
         match self.preferred_backend {
             WindowsCaptureBackendKind::DxgiDuplication => {
                 if let Some(backend) = &mut self.dxgi_backend {
                     match backend.capture(max_dimensions) {
-                        Ok(image) => CaptureFrame {
-                            image,
-                            backend: "windows-dxgi",
-                            used_fallback: false,
-                        },
+                        Ok(image) => self.capture_frame(image, "windows-dxgi", false),
                         Err(error) => {
                             logging::append_log(
                                 "WARN",
@@ -86,11 +90,9 @@ impl WindowsCaptureEngine {
 
                             if should_retry_dxgi(&error) {
                                 match self.capture_with_gdi(max_dimensions) {
-                                    Ok(image) => CaptureFrame {
-                                        image,
-                                        backend: "windows-gdi-temporary",
-                                        used_fallback: false,
-                                    },
+                                    Ok(image) => {
+                                        self.capture_frame(image, "windows-gdi-temporary", false)
+                                    }
                                     Err(gdi_error) => {
                                         logging::append_log(
                                             "WARN",
@@ -102,8 +104,7 @@ impl WindowsCaptureEngine {
                                         );
                                         self.preferred_backend =
                                             WindowsCaptureBackendKind::ScreenshotsFallback;
-                                        self.screenshots_fallback
-                                            .capture(max_dimensions, frame_index)
+                                        self.capture_with_screenshots(max_dimensions, frame_index)
                                     }
                                 }
                             } else {
@@ -129,11 +130,7 @@ impl WindowsCaptureEngine {
             }
             WindowsCaptureBackendKind::Win32Gdi => {
                 match self.capture_with_gdi(max_dimensions) {
-                    Ok(image) => CaptureFrame {
-                        image,
-                        backend: "windows-gdi",
-                        used_fallback: false,
-                    },
+                    Ok(image) => self.capture_frame(image, "windows-gdi", false),
                     Err(error) => {
                         logging::append_log(
                             "WARN",
@@ -144,12 +141,12 @@ impl WindowsCaptureEngine {
                             ),
                         );
                         self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
-                        self.screenshots_fallback.capture(max_dimensions, frame_index)
+                        self.capture_with_screenshots(max_dimensions, frame_index)
                     }
                 }
             }
             WindowsCaptureBackendKind::ScreenshotsFallback => {
-                self.screenshots_fallback.capture(max_dimensions, frame_index)
+                self.capture_with_screenshots(max_dimensions, frame_index)
             }
         }
     }
@@ -163,6 +160,89 @@ impl WindowsCaptureEngine {
         let result = backend.capture(max_dimensions);
         self.gdi_backend = Some(backend);
         result
+    }
+
+    fn capture_with_screenshots(
+        &mut self,
+        max_dimensions: (u32, u32),
+        frame_index: u32,
+    ) -> CaptureFrame {
+        match self.screenshots_fallback.try_capture(max_dimensions) {
+            Ok(image) => {
+                self.capture_frame(image, self.screenshots_fallback.backend_name(), false)
+            }
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.screenshots",
+                    format!("frame capture failed: {}", error),
+                );
+                if let Some(image) = self.last_successful_frame.clone() {
+                    return CaptureFrame {
+                        image,
+                        backend: "windows-last-frame",
+                        used_fallback: false,
+                    };
+                }
+                CaptureFrame {
+                    image: super::common::build_test_frame(frame_index),
+                    backend: "test-fallback",
+                    used_fallback: true,
+                }
+            }
+        }
+    }
+
+    fn capture_frame(
+        &mut self,
+        image: RgbaImage,
+        backend: &'static str,
+        used_fallback: bool,
+    ) -> CaptureFrame {
+        self.last_successful_frame = Some(image.clone());
+        CaptureFrame {
+            image,
+            backend,
+            used_fallback,
+        }
+    }
+
+    fn try_restore_primary_backends(&mut self) {
+        if self.dxgi_backend.is_none() {
+            self.dxgi_backend = match DxgiCaptureBackend::new() {
+                Ok(backend) => Some(backend),
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "capture.dxgi",
+                        format!("reinitialization failed: {}", error),
+                    );
+                    None
+                }
+            };
+        }
+
+        if self.gdi_backend.is_none() {
+            self.gdi_backend = match GdiCaptureBackend::new() {
+                Ok(backend) => Some(backend),
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "capture.gdi",
+                        format!("reinitialization failed: {}", error),
+                    );
+                    None
+                }
+            };
+        }
+
+        if self.dxgi_backend.is_some() {
+            logging::append_log("INFO", "capture", "retrying primary backend windows-dxgi");
+            self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
+        } else if self.gdi_backend.is_some() {
+            logging::append_log("INFO", "capture", "retrying primary backend windows-gdi");
+            self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
+        }
     }
 }
 

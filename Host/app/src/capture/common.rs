@@ -16,31 +16,41 @@ impl ScreenshotsCaptureBackend {
         }
     }
 
-    pub fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> CaptureFrame {
+    pub fn try_capture(
+        &mut self,
+        max_dimensions: (u32, u32),
+    ) -> Result<RgbaImage, String> {
         match self.active_screen.as_ref() {
             Some(screen) => match capture_screen_image(screen, max_dimensions) {
-                Ok(image) => CaptureFrame {
-                    image,
-                    backend: self.backend_name,
-                    used_fallback: false,
-                },
-                Err(_) => {
+                Ok(image) => Ok(image),
+                Err(error) => {
                     self.active_screen = select_capture_screen();
-                    CaptureFrame {
-                        image: build_test_frame(frame_index),
-                        backend: "test-fallback",
-                        used_fallback: true,
-                    }
+                    Err(error)
                 }
             },
             None => {
                 self.active_screen = select_capture_screen();
-                CaptureFrame {
-                    image: build_test_frame(frame_index),
-                    backend: "test-fallback",
-                    used_fallback: true,
-                }
+                Err("no active screen available".to_owned())
             }
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.backend_name
+    }
+
+    pub fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> CaptureFrame {
+        match self.try_capture(max_dimensions) {
+            Ok(image) => CaptureFrame {
+                image,
+                backend: self.backend_name,
+                used_fallback: false,
+            },
+            Err(_) => CaptureFrame {
+                image: build_test_frame(frame_index),
+                backend: "test-fallback",
+                used_fallback: true,
+            },
         }
     }
 }
@@ -95,7 +105,7 @@ pub(crate) fn fit_frame(image: RgbaImage, max_dimensions: (u32, u32)) -> RgbaIma
     canvas
 }
 
-fn build_test_frame(frame_index: u32) -> RgbaImage {
+pub(crate) fn build_test_frame(frame_index: u32) -> RgbaImage {
     const TEST_FRAME_WIDTH: u32 = 960;
     const TEST_FRAME_HEIGHT: u32 = 540;
 

@@ -143,6 +143,14 @@ impl StreamCodecPreference {
     }
 }
 
+fn default_stream_codec_preference() -> StreamCodecPreference {
+    if cfg!(windows) {
+        StreamCodecPreference::Vp8
+    } else {
+        StreamCodecPreference::H264
+    }
+}
+
 impl StreamQualityProfile {
     fn wire_name(self) -> &'static str {
         match self {
@@ -442,7 +450,7 @@ impl ConsoleApp {
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Balanced,
-            stream_codec_preference: StreamCodecPreference::H264,
+            stream_codec_preference: default_stream_codec_preference(),
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,
             last_synced_stream_codec: None,
@@ -756,7 +764,7 @@ impl ConsoleApp {
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Balanced;
-        self.stream_codec_preference = StreamCodecPreference::H264;
+        self.stream_codec_preference = default_stream_codec_preference();
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;
         self.last_synced_stream_codec = None;
@@ -1507,10 +1515,26 @@ impl ConsoleApp {
                                         StreamQualityProfile::Sharp,
                                         StreamQualityProfile::Sharp.label(),
                                     );
-                                });
+                            });
                             ui.separator();
-                            ui.label("codec VP8");
-                            if self.stream_quality_profile != previous_profile {
+                            let previous_codec = self.stream_codec_preference;
+                            egui::ComboBox::from_id_salt("session_codec_preference")
+                                .selected_text(self.stream_codec_preference.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::H264,
+                                        StreamCodecPreference::H264.label(),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::Vp8,
+                                        StreamCodecPreference::Vp8.label(),
+                                    );
+                                });
+                            if self.stream_quality_profile != previous_profile
+                                || self.stream_codec_preference != previous_codec
+                            {
                                 self.sync_stream_profile(&session, "ui.change");
                             }
                         });
