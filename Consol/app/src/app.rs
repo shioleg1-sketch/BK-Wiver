@@ -47,7 +47,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn app_build_label() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("BK_WIVER_COMMIT").unwrap_or("dev");
-    format!("build {} ({})", version, shorten_commit(commit))
+    let build_id = option_env!("BK_WIVER_BUILD_ID").unwrap_or("local");
+    format!(
+        "build {} ({}, {})",
+        version,
+        shorten_commit(commit),
+        build_id
+    )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1550,6 +1556,12 @@ impl ConsoleApp {
                             .size(22.0)
                             .strong()
                             .color(Color32::from_rgb(37, 54, 74)),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(app_build_label())
+                            .monospace()
+                            .color(Color32::from_rgb(108, 118, 128)),
                     );
                     ui.add_space(12.0);
                     if menu_button(ui, self.tr(TextKey::Connect)).clicked() {

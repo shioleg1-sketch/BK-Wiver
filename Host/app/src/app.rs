@@ -139,6 +139,26 @@ fn runtime_mode() -> RuntimeMode {
     }
 }
 
+fn app_build_label() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let commit = option_env!("BK_WIVER_COMMIT").unwrap_or("dev");
+    let build_id = option_env!("BK_WIVER_BUILD_ID").unwrap_or("local");
+    format!(
+        "build {} ({}, {})",
+        version,
+        shorten_commit(commit),
+        build_id
+    )
+}
+
+fn shorten_commit(commit: &str) -> String {
+    if commit.len() <= 8 {
+        commit.to_owned()
+    } else {
+        commit[..8].to_owned()
+    }
+}
+
 fn run_tray_app() -> Result<(), Box<dyn std::error::Error>> {
     let (command_tx, command_rx) = unbounded::<HostUiCommand>();
     spawn_tray(command_tx);
@@ -868,6 +888,11 @@ impl App for HostApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("BK-Host");
+            ui.label(
+                RichText::new(app_build_label())
+                    .monospace()
+                    .color(Color32::from_rgb(108, 118, 128)),
+            );
             ui.label(self.tr(
                 "BK-Host устанавливается на ПК пользователя, работает в трее и показывает ID хоста для подключений оператора.",
                 "BK-Host is installed on the user PC, runs in the tray, and exposes the host ID for operator connections.",
