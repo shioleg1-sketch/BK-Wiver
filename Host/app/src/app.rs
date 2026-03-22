@@ -206,6 +206,9 @@ fn run_agent_mode() {
     #[cfg(windows)]
     let session_details = current_session_details();
 
+    #[cfg(windows)]
+    logging::append_log("INFO", "agent.session", &session_details);
+
     loop {
         let _ = publish_agent_status(
             "running",
@@ -229,20 +232,22 @@ fn current_session_details() -> String {
     use windows_sys::Win32::{
         Foundation::FALSE,
         System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId},
+        UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION},
     };
 
     let process_id = std::process::id();
     let mut session_id = 0u32;
     let process_session = unsafe { ProcessIdToSessionId(process_id, &mut session_id) };
     let active_console_session = unsafe { WTSGetActiveConsoleSessionId() };
+    let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
 
     if process_session == FALSE {
         format!(
-            "Агент Host работает. session_id=unknown active_console_session={active_console_session}"
+            "Агент Host работает. session_id=unknown active_console_session={active_console_session} remote_session={remote_session}"
         )
     } else {
         format!(
-            "Агент Host работает. session_id={session_id} active_console_session={active_console_session}"
+            "Агент Host работает. session_id={session_id} active_console_session={active_console_session} remote_session={remote_session}"
         )
     }
 }
