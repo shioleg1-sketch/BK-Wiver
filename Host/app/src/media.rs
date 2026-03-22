@@ -18,7 +18,6 @@ use crate::{capture::CaptureEngine, logging};
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_VERSION: u8 = 1;
-const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
 const IVF_HEADER_LEN: usize = 32;
 const IVF_FRAME_HEADER_LEN: usize = 12;
 const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
@@ -94,14 +93,6 @@ impl StreamProfile {
             Self::Fast => Duration::from_millis(28),
             Self::Balanced => Duration::from_millis(34),
             Self::Sharp => Duration::from_millis(33),
-        }
-    }
-
-    fn idle_frame_delay(self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_millis(90),
-            Self::Balanced => Duration::from_millis(120),
-            Self::Sharp => Duration::from_millis(90),
         }
     }
 
@@ -319,7 +310,6 @@ pub fn spawn_stream(
         let mut stream_tick = 0_u64;
         let mut capture_engine = CaptureEngine::new();
         let mut previous_signature: Option<Vec<u8>> = None;
-        let mut last_sent_tick = 0_u64;
 
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
@@ -357,14 +347,6 @@ pub fn spawn_stream(
                             .map(|previous| signature_distance(previous, &signature) > 2)
                             .unwrap_or(true);
                         previous_signature = Some(signature);
-                        let should_refresh_idle =
-                            stream_tick.saturating_sub(last_sent_tick) >= IDLE_REFRESH_INTERVAL_TICKS;
-
-                        if !is_active && !should_refresh_idle {
-                            thread::sleep(stream_profile.idle_frame_delay());
-                            continue;
-                        }
-
                         let mut sent_frame = false;
                         let mut path_label = "vp8";
                         let mut encode_elapsed = Duration::ZERO;
@@ -482,17 +464,11 @@ pub fn spawn_stream(
                             }
                         }
 
-                        if sent_frame {
-                            last_sent_tick = stream_tick;
-                        } else {
+                        if !sent_frame {
                             path_label = "vp8-wait";
                         }
 
-                        let sleep_duration = if is_active {
-                            stream_profile.active_frame_delay()
-                        } else {
-                            stream_profile.idle_frame_delay()
-                        };
+                        let sleep_duration = stream_profile.active_frame_delay();
                         perf_log_frame_index = perf_log_frame_index.saturating_add(1);
                         if perf_log_frame_index <= 5 || perf_log_frame_index % 60 == 0 {
                             logging::append_log(

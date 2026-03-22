@@ -50,6 +50,9 @@ enum MediaPacketKind {
 struct Vp8DecoderSession {
     child: Child,
     stdin: ChildStdin,
+    session_id: String,
+    pushed_calls: u64,
+    pushed_bytes: usize,
 }
 
 struct Vp8SampleCapture {
@@ -87,12 +90,6 @@ impl Vp8DecoderSession {
         command
             .arg("-loglevel")
             .arg("error")
-            .arg("-fflags")
-            .arg("nobuffer")
-            .arg("-probesize")
-            .arg("32")
-            .arg("-analyzeduration")
-            .arg("0")
             .arg("-f")
             .arg("ivf")
             .arg("-i")
@@ -129,6 +126,14 @@ impl Vp8DecoderSession {
         thread::spawn(move || {
             let mut decoded_frame_count = 0_u64;
             let mut frame = vec![0_u8; frame_size];
+            logging::append_log(
+                "INFO",
+                "media.vp8_decoder",
+                format!(
+                    "decoder stdout reader started session_id={} frame_size={}",
+                    session_id_for_stdout, frame_size
+                ),
+            );
             loop {
                 match stdout.read_exact(&mut frame) {
                     Ok(()) => {
@@ -193,13 +198,35 @@ impl Vp8DecoderSession {
             }
         });
 
-        Ok(Self { child, stdin })
+        Ok(Self {
+            child,
+            stdin,
+            session_id,
+            pushed_calls: 0,
+            pushed_bytes: 0,
+        })
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.pushed_calls = self.pushed_calls.saturating_add(1);
+        self.pushed_bytes = self.pushed_bytes.saturating_add(bytes.len());
+        if self.pushed_calls <= 3 || self.pushed_calls % 120 == 0 {
+            logging::append_log(
+                "INFO",
+                "media.vp8_decoder",
+                format!(
+                    "stdin push session_id={} call={} bytes={} total_bytes={}",
+                    self.session_id,
+                    self.pushed_calls,
+                    bytes.len(),
+                    self.pushed_bytes
+                ),
+            );
+        }
         self.stdin
             .write_all(bytes)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.stdin.flush().map_err(|error| error.to_string())
     }
 }
 
