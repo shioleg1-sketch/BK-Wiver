@@ -10,6 +10,8 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
 };
 
+use crate::logging;
+
 use super::{
     CaptureFrame,
     common::{ScreenshotsCaptureBackend, fit_frame},
@@ -31,10 +33,34 @@ pub struct WindowsCaptureEngine {
 
 impl WindowsCaptureEngine {
     pub fn new() -> Self {
+        let dxgi_backend = match DxgiCaptureBackend::new() {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi",
+                    format!("initialization failed: {}", error),
+                );
+                None
+            }
+        };
+
+        let gdi_backend = match GdiCaptureBackend::new() {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.gdi",
+                    format!("initialization failed: {}", error),
+                );
+                None
+            }
+        };
+
         Self {
             preferred_backend: WindowsCaptureBackendKind::DxgiDuplication,
-            dxgi_backend: DxgiCaptureBackend::new().ok(),
-            gdi_backend: GdiCaptureBackend::new().ok(),
+            dxgi_backend,
+            gdi_backend,
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
                 "windows-screenshots-fallback",
             ),
@@ -51,37 +77,72 @@ impl WindowsCaptureEngine {
                             backend: "windows-dxgi",
                             used_fallback: false,
                         },
-                        Err(_) => {
-                            self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
-                            self.capture(max_dimensions, frame_index)
+                        Err(error) => {
+                            logging::append_log(
+                                "WARN",
+                                "capture.dxgi",
+                                format!("frame capture failed: {}", error),
+                            );
+
+                            if should_retry_dxgi(&error) {
+                                match self.capture_with_gdi(max_dimensions) {
+                                    Ok(image) => CaptureFrame {
+                                        image,
+                                        backend: "windows-gdi-temporary",
+                                        used_fallback: false,
+                                    },
+                                    Err(gdi_error) => {
+                                        logging::append_log(
+                                            "WARN",
+                                            "capture.gdi",
+                                            format!(
+                                                "temporary fallback after dxgi failure also failed: {}",
+                                                gdi_error
+                                            ),
+                                        );
+                                        self.preferred_backend =
+                                            WindowsCaptureBackendKind::ScreenshotsFallback;
+                                        self.screenshots_fallback
+                                            .capture(max_dimensions, frame_index)
+                                    }
+                                }
+                            } else {
+                                logging::append_log(
+                                    "WARN",
+                                    "capture.dxgi",
+                                    "switching preferred backend to windows-gdi",
+                                );
+                                self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
+                                self.capture(max_dimensions, frame_index)
+                            }
                         }
                     }
                 } else {
+                    logging::append_log(
+                        "WARN",
+                        "capture.dxgi",
+                        "backend unavailable, switching preferred backend to windows-gdi",
+                    );
                     self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
                     self.capture(max_dimensions, frame_index)
                 }
             }
             WindowsCaptureBackendKind::Win32Gdi => {
-                let capture_result = if let Some(backend) = &mut self.gdi_backend {
-                    backend.capture(max_dimensions)
-                } else {
-                    match GdiCaptureBackend::new() {
-                        Ok(mut backend) => {
-                            let result = backend.capture(max_dimensions);
-                            self.gdi_backend = Some(backend);
-                            result
-                        }
-                        Err(error) => Err(error),
-                    }
-                };
-
-                match capture_result {
+                match self.capture_with_gdi(max_dimensions) {
                     Ok(image) => CaptureFrame {
                         image,
                         backend: "windows-gdi",
                         used_fallback: false,
                     },
-                    Err(_) => {
+                    Err(error) => {
+                        logging::append_log(
+                            "WARN",
+                            "capture.gdi",
+                            format!(
+                                "frame capture failed, switching preferred backend to screenshots fallback: {}",
+                                error
+                            ),
+                        );
                         self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
                         self.screenshots_fallback.capture(max_dimensions, frame_index)
                     }
@@ -91,6 +152,17 @@ impl WindowsCaptureEngine {
                 self.screenshots_fallback.capture(max_dimensions, frame_index)
             }
         }
+    }
+
+    fn capture_with_gdi(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
+        if let Some(backend) = &mut self.gdi_backend {
+            return backend.capture(max_dimensions);
+        }
+
+        let mut backend = GdiCaptureBackend::new()?;
+        let result = backend.capture(max_dimensions);
+        self.gdi_backend = Some(backend);
+        result
     }
 }
 
@@ -292,4 +364,8 @@ fn current_screen_size() -> Result<(i32, i32), String> {
         return Err("invalid screen size".to_owned());
     }
     Ok((width, height))
+}
+
+fn should_retry_dxgi(error: &str) -> bool {
+    error.contains("timeout before first frame") || error.contains("access lost before first frame")
 }
