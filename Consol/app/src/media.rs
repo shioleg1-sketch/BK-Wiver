@@ -466,5 +466,19 @@ fn ffmpeg_executable_path() -> PathBuf {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        for candidate in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/local/bin/ffmpeg",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+
     PathBuf::from(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" })
 }
