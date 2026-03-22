@@ -447,7 +447,7 @@ impl ConsoleApp {
             media_changed_frame_count: 0,
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
-            stream_quality_profile: StreamQualityProfile::Sharp,
+            stream_quality_profile: StreamQualityProfile::Balanced,
             stream_codec_preference: StreamCodecPreference::H264,
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,
@@ -761,7 +761,7 @@ impl ConsoleApp {
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
-        self.stream_quality_profile = StreamQualityProfile::Sharp;
+        self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.stream_codec_preference = StreamCodecPreference::H264;
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;

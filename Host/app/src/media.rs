@@ -136,18 +136,17 @@ impl StreamProfile {
         match self {
             Self::Fast => "realtime",
             Self::Balanced => "realtime",
-            Self::Sharp => "good",
+            Self::Sharp => "realtime",
         }
     }
 
     fn target_cpu_used(self) -> &'static str {
         match self {
-            Self::Fast => "8",
-            Self::Balanced => "6",
-            Self::Sharp => "5",
+            Self::Fast => "9",
+            Self::Balanced => "8",
+            Self::Sharp => "8",
         }
     }
-
 }
 
 struct Vp8EncoderSession {
