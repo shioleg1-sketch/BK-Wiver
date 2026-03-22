@@ -140,15 +140,9 @@ fn runtime_mode() -> RuntimeMode {
 }
 
 fn app_build_label() -> String {
-    let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("BK_WIVER_COMMIT").unwrap_or("dev");
     let build_id = option_env!("BK_WIVER_BUILD_ID").unwrap_or("local");
-    format!(
-        "build {} ({}, {})",
-        version,
-        shorten_commit(commit),
-        build_id
-    )
+    format!("build {} ({})", shorten_commit(commit), build_id)
 }
 
 fn shorten_commit(commit: &str) -> String {

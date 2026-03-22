@@ -4,8 +4,8 @@ use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
-        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ,
-        ReleaseDC, SRCCOPY, SelectObject,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP,
+        HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
     },
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
 };
@@ -25,6 +25,7 @@ enum WindowsCaptureBackendKind {
 pub struct WindowsCaptureEngine {
     preferred_backend: WindowsCaptureBackendKind,
     dxgi_backend: Option<DxgiCaptureBackend>,
+    gdi_backend: Option<GdiCaptureBackend>,
     screenshots_fallback: ScreenshotsCaptureBackend,
 }
 
@@ -33,6 +34,7 @@ impl WindowsCaptureEngine {
         Self {
             preferred_backend: WindowsCaptureBackendKind::DxgiDuplication,
             dxgi_backend: DxgiCaptureBackend::new().ok(),
+            gdi_backend: GdiCaptureBackend::new().ok(),
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
                 "windows-screenshots-fallback",
             ),
@@ -59,16 +61,30 @@ impl WindowsCaptureEngine {
                     self.capture(max_dimensions, frame_index)
                 }
             }
-            WindowsCaptureBackendKind::Win32Gdi => match capture_primary_screen_gdi(max_dimensions)
-            {
-                Ok(image) => CaptureFrame {
-                    image,
-                    backend: "windows-gdi",
-                    used_fallback: false,
-                },
-                Err(_) => {
-                    self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
-                    self.screenshots_fallback.capture(max_dimensions, frame_index)
+            WindowsCaptureBackendKind::Win32Gdi => {
+                let capture_result = if let Some(backend) = &mut self.gdi_backend {
+                    backend.capture(max_dimensions)
+                } else {
+                    match GdiCaptureBackend::new() {
+                        Ok(mut backend) => {
+                            let result = backend.capture(max_dimensions);
+                            self.gdi_backend = Some(backend);
+                            result
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+
+                match capture_result {
+                    Ok(image) => CaptureFrame {
+                        image,
+                        backend: "windows-gdi",
+                        used_fallback: false,
+                    },
+                    Err(_) => {
+                        self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
+                        self.screenshots_fallback.capture(max_dimensions, frame_index)
+                    }
                 }
             }
             WindowsCaptureBackendKind::ScreenshotsFallback => {
@@ -122,105 +138,158 @@ impl DxgiCaptureBackend {
     }
 }
 
-fn capture_primary_screen_gdi(max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
+struct GdiCaptureBackend {
+    screen_dc: HDC,
+    memory_dc: HDC,
+    bitmap: HBITMAP,
+    previous: HGDIOBJ,
+    width: i32,
+    height: i32,
+    bgra: Vec<u8>,
+}
+
+impl GdiCaptureBackend {
+    fn new() -> Result<Self, String> {
+        let (width, height) = current_screen_size()?;
+        Self::create(width, height)
+    }
+
+    fn capture(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
+        let (width, height) = current_screen_size()?;
+        if width != self.width || height != self.height {
+            let replacement = Self::create(width, height)?;
+            *self = replacement;
+        }
+
+        let blt_ok = unsafe {
+            BitBlt(
+                self.memory_dc,
+                0,
+                0,
+                self.width,
+                self.height,
+                self.screen_dc,
+                0,
+                0,
+                SRCCOPY | CAPTUREBLT,
+            )
+        };
+        if blt_ok == 0 {
+            return Err("BitBlt failed".to_owned());
+        }
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: self.width,
+                biHeight: -self.height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: (self.width * self.height * 4) as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [unsafe { std::mem::zeroed() }; 1],
+        };
+
+        let scanlines = unsafe {
+            GetDIBits(
+                self.memory_dc,
+                self.bitmap,
+                0,
+                self.height as u32,
+                self.bgra.as_mut_ptr() as *mut _,
+                &mut info,
+                DIB_RGB_COLORS,
+            )
+        };
+
+        if scanlines == 0 {
+            return Err("GetDIBits failed".to_owned());
+        }
+
+        let mut rgba = self.bgra.clone();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+
+        let image = ImageBuffer::from_raw(self.width as u32, self.height as u32, rgba)
+            .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
+        Ok(fit_frame(image, max_dimensions))
+    }
+
+    fn create(width: i32, height: i32) -> Result<Self, String> {
+        let screen_dc = unsafe { GetDC(0 as HWND) };
+        if screen_dc.is_null() {
+            return Err("GetDC failed".to_owned());
+        }
+
+        let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
+        if memory_dc.is_null() {
+            unsafe {
+                ReleaseDC(0 as HWND, screen_dc);
+            }
+            return Err("CreateCompatibleDC failed".to_owned());
+        }
+
+        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, width, height) };
+        if bitmap.is_null() {
+            unsafe {
+                DeleteDC(memory_dc);
+                ReleaseDC(0 as HWND, screen_dc);
+            }
+            return Err("CreateCompatibleBitmap failed".to_owned());
+        }
+
+        let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
+        if previous.is_null() {
+            unsafe {
+                DeleteObject(bitmap as HGDIOBJ);
+                DeleteDC(memory_dc);
+                ReleaseDC(0 as HWND, screen_dc);
+            }
+            return Err("SelectObject failed".to_owned());
+        }
+
+        Ok(Self {
+            screen_dc,
+            memory_dc,
+            bitmap,
+            previous,
+            width,
+            height,
+            bgra: vec![0_u8; (width as usize) * (height as usize) * 4],
+        })
+    }
+}
+
+impl Drop for GdiCaptureBackend {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.memory_dc.is_null() && !self.previous.is_null() {
+                SelectObject(self.memory_dc, self.previous);
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap as HGDIOBJ);
+            }
+            if !self.memory_dc.is_null() {
+                DeleteDC(self.memory_dc);
+            }
+            if !self.screen_dc.is_null() {
+                ReleaseDC(0 as HWND, self.screen_dc);
+            }
+        }
+    }
+}
+
+fn current_screen_size() -> Result<(i32, i32), String> {
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     if width <= 0 || height <= 0 {
         return Err("invalid screen size".to_owned());
     }
-
-    let screen_dc = unsafe { GetDC(0 as HWND) };
-    if screen_dc.is_null() {
-        return Err("GetDC failed".to_owned());
-    }
-
-    let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
-    if memory_dc.is_null() {
-        unsafe {
-            ReleaseDC(0 as HWND, screen_dc);
-        }
-        return Err("CreateCompatibleDC failed".to_owned());
-    }
-
-    let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, width, height) };
-    if bitmap.is_null() {
-        unsafe {
-            DeleteDC(memory_dc);
-            ReleaseDC(0 as HWND, screen_dc);
-        }
-        return Err("CreateCompatibleBitmap failed".to_owned());
-    }
-
-    let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
-    let blt_ok = unsafe {
-        BitBlt(
-            memory_dc,
-            0,
-            0,
-            width,
-            height,
-            screen_dc,
-            0,
-            0,
-            SRCCOPY | CAPTUREBLT,
-        )
-    };
-    if blt_ok == 0 {
-        unsafe {
-            SelectObject(memory_dc, previous);
-            DeleteObject(bitmap as HGDIOBJ);
-            DeleteDC(memory_dc);
-            ReleaseDC(0 as HWND, screen_dc);
-        }
-        return Err("BitBlt failed".to_owned());
-    }
-
-    let mut info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            biSizeImage: (width * height * 4) as u32,
-            biXPelsPerMeter: 0,
-            biYPelsPerMeter: 0,
-            biClrUsed: 0,
-            biClrImportant: 0,
-        },
-        bmiColors: [unsafe { std::mem::zeroed() }; 1],
-    };
-
-    let mut bgra = vec![0_u8; (width as usize) * (height as usize) * 4];
-    let scanlines = unsafe {
-        GetDIBits(
-            memory_dc,
-            bitmap,
-            0,
-            height as u32,
-            bgra.as_mut_ptr() as *mut _,
-            &mut info,
-            DIB_RGB_COLORS,
-        )
-    };
-
-    unsafe {
-        SelectObject(memory_dc, previous);
-        DeleteObject(bitmap as HGDIOBJ);
-        DeleteDC(memory_dc);
-        ReleaseDC(0 as HWND, screen_dc);
-    }
-
-    if scanlines == 0 {
-        return Err("GetDIBits failed".to_owned());
-    }
-
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-
-    let image = ImageBuffer::from_raw(width as u32, height as u32, bgra)
-        .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
-    Ok(fit_frame(image, max_dimensions))
+    Ok((width, height))
 }

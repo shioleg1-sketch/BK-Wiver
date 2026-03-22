@@ -1,5 +1,6 @@
 use std::{
     env,
+    path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +22,7 @@ fn emit_build_metadata() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=BK_WIVER_COMMIT");
     println!("cargo:rerun-if-env-changed=BK_WIVER_BUILD_ID");
+    emit_git_rerun_triggers();
 
     let commit = env::var("BK_WIVER_COMMIT")
         .ok()
@@ -35,6 +37,22 @@ fn emit_build_metadata() {
 
     println!("cargo:rustc-env=BK_WIVER_COMMIT={commit}");
     println!("cargo:rustc-env=BK_WIVER_BUILD_ID={build_id}");
+}
+
+fn emit_git_rerun_triggers() {
+    let Some(git_dir) = git_output(&["rev-parse", "--git-dir"]) else {
+        return;
+    };
+
+    let git_dir = PathBuf::from(git_dir);
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+
+    if let Some(head_ref) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join(head_ref).display()
+        );
+    }
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

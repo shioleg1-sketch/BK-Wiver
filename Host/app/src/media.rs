@@ -9,7 +9,7 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -469,6 +469,7 @@ pub fn spawn_stream(
                     let mut vp8_header_buffer = Vec::new();
                     let mut vp8_chunks_sent = 0_u64;
                     let mut h264_packets_sent = 0_u64;
+                    let mut sent_frames = 0_u64;
 
                     while !stop_flag.load(Ordering::Relaxed) {
                         let stream_profile =
@@ -477,8 +478,10 @@ pub fn spawn_stream(
                             .lock()
                             .map(|guard| *guard)
                             .unwrap_or(StreamCodec::H264);
+                        let capture_started_at = Instant::now();
                         let captured =
                             capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                        let capture_ms = capture_started_at.elapsed().as_millis();
                         let frame_image = captured.image;
                         frame_index = frame_index.wrapping_add(1);
 
@@ -492,6 +495,7 @@ pub fn spawn_stream(
 
                         match preferred_codec {
                             StreamCodec::H264 => {
+                                let mut sent_packets_this_frame = 0_u64;
                                 if ensure_h264_encoder(
                                     &mut h264_encoder,
                                     frame_image.width(),
@@ -545,6 +549,8 @@ pub fn spawn_stream(
                                                 {
                                                     break;
                                                 }
+                                                sent_packets_this_frame =
+                                                    sent_packets_this_frame.saturating_add(1);
                                                 h264_packets_sent =
                                                     h264_packets_sent.saturating_add(1);
                                                 if h264_packets_sent == 1
@@ -579,8 +585,31 @@ pub fn spawn_stream(
                                     h264_encoder = None;
                                     h264_config_sent = false;
                                 }
+
+                                let total_ms = capture_started_at.elapsed().as_millis();
+                                let encode_ms = total_ms.saturating_sub(capture_ms);
+                                sent_frames = sent_frames.saturating_add(1);
+                                if sent_frames <= 5 || sent_frames % 60 == 0 {
+                                    logging::append_log(
+                                        "INFO",
+                                        "media.perf",
+                                        format!(
+                                            "session_id={} codec=h264 profile={} backend={} frame={} capture_ms={} encode_ms={} send_ms={} packets={} total_ms={}",
+                                            session_id,
+                                            stream_profile.wire_name(),
+                                            captured.backend,
+                                            sent_frames,
+                                            capture_ms,
+                                            encode_ms,
+                                            0,
+                                            sent_packets_this_frame,
+                                            total_ms
+                                        ),
+                                    );
+                                }
                             }
                             StreamCodec::Vp8 => {
+                                let mut sent_packets_this_frame = 0_u64;
                                 match ensure_vp8_encoder(
                                     &mut vp8_encoder,
                                     frame_image.width(),
@@ -634,6 +663,8 @@ pub fn spawn_stream(
                                                             {
                                                                 break;
                                                             }
+                                                            sent_packets_this_frame =
+                                                                sent_packets_this_frame.saturating_add(1);
                                                         }
                                                         vp8_header_buffer.clear();
                                                     } else if send_vp8_frame_chunks(
@@ -644,6 +675,9 @@ pub fn spawn_stream(
                                                     .is_err()
                                                     {
                                                         break;
+                                                    } else {
+                                                        sent_packets_this_frame =
+                                                            sent_packets_this_frame.saturating_add(1);
                                                     }
                                                 }
                                             } else {
@@ -658,6 +692,28 @@ pub fn spawn_stream(
                                         vp8_config_sent = false;
                                         vp8_header_buffer.clear();
                                     }
+                                }
+
+                                let total_ms = capture_started_at.elapsed().as_millis();
+                                let encode_ms = total_ms.saturating_sub(capture_ms);
+                                sent_frames = sent_frames.saturating_add(1);
+                                if sent_frames <= 5 || sent_frames % 60 == 0 {
+                                    logging::append_log(
+                                        "INFO",
+                                        "media.perf",
+                                        format!(
+                                            "session_id={} codec=vp8 profile={} backend={} frame={} capture_ms={} encode_ms={} send_ms={} packets={} total_ms={}",
+                                            session_id,
+                                            stream_profile.wire_name(),
+                                            captured.backend,
+                                            sent_frames,
+                                            capture_ms,
+                                            encode_ms,
+                                            0,
+                                            sent_packets_this_frame,
+                                            total_ms
+                                        ),
+                                    );
                                 }
                             }
                         };

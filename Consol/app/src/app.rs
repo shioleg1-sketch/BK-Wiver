@@ -45,15 +45,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn app_build_label() -> String {
-    let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("BK_WIVER_COMMIT").unwrap_or("dev");
     let build_id = option_env!("BK_WIVER_BUILD_ID").unwrap_or("local");
-    format!(
-        "build {} ({}, {})",
-        version,
-        shorten_commit(commit),
-        build_id
-    )
+    format!("build {} ({})", shorten_commit(commit), build_id)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1684,12 +1678,6 @@ impl ConsoleApp {
                     ui.separator();
                     ui.label(&self.status_line);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(app_build_label())
-                                .monospace()
-                                .color(Color32::from_rgb(108, 118, 128)),
-                        );
-                        ui.separator();
                         ui.label(format!(
                             "{}: {}",
                             self.tr(TextKey::HostsCount),
