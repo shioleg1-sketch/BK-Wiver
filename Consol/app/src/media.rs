@@ -20,6 +20,8 @@ use crate::logging;
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
 const IVF_HEADER_LEN: usize = 32;
+const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
+const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
@@ -53,6 +55,12 @@ struct Vp8DecoderSession {
 struct Vp8SampleCapture {
     bytes: Vec<u8>,
     dumped: bool,
+}
+
+struct Vp8FrameAssembler {
+    buffer: Vec<u8>,
+    expected_len: usize,
+    received_len: usize,
 }
 
 impl Vp8DecoderSession {
@@ -224,6 +232,7 @@ pub fn spawn_listener(
                     let mut vp8_decoder: Option<Vp8DecoderSession> = None;
                     let mut vp8_frame_packet_count = 0_u64;
                     let mut vp8_sample_capture: Option<Vp8SampleCapture> = None;
+                    let mut vp8_frame_assembler: Option<Vp8FrameAssembler> = None;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -266,6 +275,7 @@ pub fn spawn_listener(
                                                 bytes: payload.clone(),
                                                 dumped: false,
                                             });
+                                            vp8_frame_assembler = None;
                                             match Vp8DecoderSession::new(
                                                 width,
                                                 height,
@@ -315,46 +325,71 @@ pub fn spawn_listener(
                                                     ),
                                                 );
                                             }
-                                            if let Some(sample) = &mut vp8_sample_capture
-                                                && !sample.dumped
-                                            {
-                                                sample.bytes.extend_from_slice(&payload);
-                                                match logging::write_state_bytes(
-                                                    &format!("vp8-sample-{}.ivf", session_id),
-                                                    &sample.bytes,
-                                                ) {
-                                                    Ok(path) => {
-                                                        logging::append_log(
-                                                            "INFO",
-                                                            "media.vp8_decoder",
-                                                            format!(
-                                                                "sample dumped session_id={} path={}",
-                                                                session_id,
-                                                                path.display()
-                                                            ),
-                                                        );
-                                                        sample.dumped = true;
-                                                    }
-                                                    Err(error) => {
-                                                        logging::append_log(
-                                                            "WARN",
-                                                            "media.vp8_decoder",
-                                                            format!(
-                                                                "sample dump failed session_id={} error={}",
-                                                                session_id, error
-                                                            ),
-                                                        );
+                                            let frame_packet = match decode_vp8_frame_chunk(
+                                                &payload,
+                                                &mut vp8_frame_assembler,
+                                            ) {
+                                                Ok(frame_packet) => frame_packet,
+                                                Err(error) => {
+                                                    logging::append_log(
+                                                        "WARN",
+                                                        "media.vp8_decoder",
+                                                        format!(
+                                                            "frame reassembly failed session_id={} error={}",
+                                                            session_id, error
+                                                        ),
+                                                    );
+                                                    vp8_frame_assembler = None;
+                                                    None
+                                                }
+                                            };
+
+                                            if let Some(frame_packet) = frame_packet {
+                                                if let Some(sample) = &mut vp8_sample_capture
+                                                    && !sample.dumped
+                                                {
+                                                    sample.bytes.extend_from_slice(&frame_packet);
+                                                    match logging::write_state_bytes(
+                                                        &format!("vp8-sample-{}.ivf", session_id),
+                                                        &sample.bytes,
+                                                    ) {
+                                                        Ok(path) => {
+                                                            logging::append_log(
+                                                                "INFO",
+                                                                "media.vp8_decoder",
+                                                                format!(
+                                                                    "sample dumped session_id={} path={}",
+                                                                    session_id,
+                                                                    path.display()
+                                                                ),
+                                                            );
+                                                            sample.dumped = true;
+                                                        }
+                                                        Err(error) => {
+                                                            logging::append_log(
+                                                                "WARN",
+                                                                "media.vp8_decoder",
+                                                                format!(
+                                                                    "sample dump failed session_id={} error={}",
+                                                                    session_id, error
+                                                                ),
+                                                            );
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            if let Some(decoder) = &mut vp8_decoder {
-                                                if let Err(error) = decoder.push_bytes(&payload) {
-                                                    logging::append_log(
-                                                        "ERROR",
-                                                        "media.vp8_decoder",
-                                                        format!("packet decode failed: {}", error),
-                                                    );
-                                                    vp8_decoder = None;
+                                                if let Some(decoder) = &mut vp8_decoder {
+                                                    if let Err(error) = decoder.push_bytes(&frame_packet)
+                                                    {
+                                                        logging::append_log(
+                                                            "ERROR",
+                                                            "media.vp8_decoder",
+                                                            format!(
+                                                                "packet decode failed: {}",
+                                                                error
+                                                            ),
+                                                        );
+                                                        vp8_decoder = None;
+                                                    }
                                                 }
                                             }
                                         }
@@ -441,6 +476,74 @@ fn parse_ivf_dimensions(header: &[u8]) -> Option<(u32, u32)> {
     let width = u16::from_le_bytes([header[12], header[13]]) as u32;
     let height = u16::from_le_bytes([header[14], header[15]]) as u32;
     Some((width, height))
+}
+
+fn decode_vp8_frame_chunk(
+    payload: &[u8],
+    assembler: &mut Option<Vp8FrameAssembler>,
+) -> Result<Option<Vec<u8>>, String> {
+    if payload.len() < VP8_FRAME_CHUNK_HEADER_LEN || &payload[..4] != VP8_FRAME_CHUNK_MAGIC {
+        return Ok(Some(payload.to_vec()));
+    }
+
+    let total_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+    let offset = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+    let chunk_len =
+        u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]) as usize;
+    let chunk = &payload[VP8_FRAME_CHUNK_HEADER_LEN..];
+
+    if chunk_len != chunk.len() {
+        return Err(format!(
+            "chunk size mismatch declared={} actual={}",
+            chunk_len,
+            chunk.len()
+        ));
+    }
+    if total_len == 0 {
+        return Err("empty frame payload".to_owned());
+    }
+    if offset > total_len || chunk_len > total_len.saturating_sub(offset) {
+        return Err(format!(
+            "invalid chunk bounds total={} offset={} chunk={}",
+            total_len, offset, chunk_len
+        ));
+    }
+
+    if offset == 0 || assembler.as_ref().map(|active| active.expected_len) != Some(total_len) {
+        *assembler = Some(Vp8FrameAssembler {
+            buffer: Vec::with_capacity(total_len),
+            expected_len: total_len,
+            received_len: 0,
+        });
+    }
+
+    let Some(active) = assembler.as_mut() else {
+        return Err("frame assembler is unavailable".to_owned());
+    };
+
+    if active.received_len != offset {
+        return Err(format!(
+            "unexpected chunk offset expected={} actual={}",
+            active.received_len, offset
+        ));
+    }
+
+    active.buffer.extend_from_slice(chunk);
+    active.received_len = active.received_len.saturating_add(chunk_len);
+
+    if active.received_len < active.expected_len {
+        return Ok(None);
+    }
+    if active.received_len > active.expected_len {
+        return Err(format!(
+            "frame overflow received={} expected={}",
+            active.received_len, active.expected_len
+        ));
+    }
+
+    let completed = std::mem::take(&mut active.buffer);
+    *assembler = None;
+    Ok(Some(completed))
 }
 
 fn ffmpeg_executable_path() -> PathBuf {

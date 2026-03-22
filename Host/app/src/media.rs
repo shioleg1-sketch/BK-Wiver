@@ -21,6 +21,9 @@ const MEDIA_PACKET_VERSION: u8 = 1;
 const IDLE_REFRESH_INTERVAL_TICKS: u64 = 30;
 const IVF_HEADER_LEN: usize = 32;
 const IVF_FRAME_HEADER_LEN: usize = 12;
+const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
+const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
+const VP8_FRAME_CHUNK_DATA_LEN: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
@@ -417,36 +420,30 @@ pub fn spawn_stream(
                                                 if vp8_header_buffer.len() > IVF_HEADER_LEN {
                                                     let remainder =
                                                         vp8_header_buffer[IVF_HEADER_LEN..].to_vec();
-                                                    let frame_packet = encode_media_packet(
-                                                        StreamCodec::Vp8,
-                                                        MediaPacketKind::Frame,
+                                                    if send_vp8_frame_chunks(
+                                                        &mut socket,
                                                         &remainder,
-                                                    );
-                                                    if socket
-                                                        .send(Message::Binary(frame_packet.into()))
-                                                        .is_err()
+                                                        &mut vp8_chunks_sent,
+                                                    )
+                                                    .is_err()
                                                     {
                                                         sent_frame = false;
                                                         break;
                                                     }
-                                                    vp8_chunks_sent =
-                                                        vp8_chunks_sent.saturating_add(1);
                                                     sent_frame = true;
                                                 }
                                                 vp8_header_buffer.clear();
                                             } else {
-                                                let frame_packet = encode_media_packet(
-                                                    StreamCodec::Vp8,
-                                                    MediaPacketKind::Frame,
+                                                if send_vp8_frame_chunks(
+                                                    &mut socket,
                                                     &chunk,
-                                                );
-                                                if socket.send(Message::Binary(frame_packet.into())).is_err()
+                                                    &mut vp8_chunks_sent,
+                                                )
+                                                .is_err()
                                                 {
                                                     sent_frame = false;
                                                     break;
                                                 }
-                                                vp8_chunks_sent =
-                                                    vp8_chunks_sent.saturating_add(1);
                                                 sent_frame = true;
                                             }
                                         }
@@ -611,4 +608,37 @@ fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]
     bytes.push(0);
     bytes.extend_from_slice(payload);
     bytes
+}
+
+fn send_vp8_frame_chunks(
+    socket: &mut tungstenite::WebSocket<
+        tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+    >,
+    frame_packet: &[u8],
+    chunk_counter: &mut u64,
+) -> Result<(), ()> {
+    let total_len = u32::try_from(frame_packet.len()).map_err(|_| ())?;
+    let mut offset = 0_usize;
+
+    while offset < frame_packet.len() {
+        let end = frame_packet
+            .len()
+            .min(offset.saturating_add(VP8_FRAME_CHUNK_DATA_LEN));
+        let chunk_len = end.saturating_sub(offset);
+        let mut payload = Vec::with_capacity(VP8_FRAME_CHUNK_HEADER_LEN + chunk_len);
+        payload.extend_from_slice(VP8_FRAME_CHUNK_MAGIC);
+        payload.extend_from_slice(&total_len.to_le_bytes());
+        payload.extend_from_slice(&(offset as u32).to_le_bytes());
+        payload.extend_from_slice(&(chunk_len as u32).to_le_bytes());
+        payload.extend_from_slice(&frame_packet[offset..end]);
+
+        let frame_packet = encode_media_packet(StreamCodec::Vp8, MediaPacketKind::Frame, &payload);
+        socket
+            .send(Message::Binary(frame_packet.into()))
+            .map_err(|_| ())?;
+        *chunk_counter = chunk_counter.saturating_add(1);
+        offset = end;
+    }
+
+    Ok(())
 }
