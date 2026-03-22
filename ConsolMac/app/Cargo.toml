@@ -2,6 +2,7 @@
 name = "bk-wiver-console-macos"
 version = "0.1.30"
 edition = "2024"
+build = "build.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 crossbeam-channel = "0.5"
