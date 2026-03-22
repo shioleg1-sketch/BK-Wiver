@@ -203,12 +203,47 @@ fn run_service_loop(stop_flag: Arc<AtomicBool>) {
 }
 
 fn run_agent_mode() {
+    #[cfg(windows)]
+    let session_details = current_session_details();
+
     loop {
         let _ = publish_agent_status(
             "running",
-            "Агент Host работает в интерактивном пользовательском сеансе.",
+            {
+                #[cfg(windows)]
+                {
+                    &session_details
+                }
+                #[cfg(not(windows))]
+                {
+                    "Агент Host работает в интерактивном пользовательском сеансе."
+                }
+            },
         );
         thread::sleep(Duration::from_millis(HOST_RUNTIME_PUBLISH_MS));
+    }
+}
+
+#[cfg(windows)]
+fn current_session_details() -> String {
+    use windows_sys::Win32::{
+        Foundation::FALSE,
+        System::{RemoteDesktop::WTSGetActiveConsoleSessionId, Threading::ProcessIdToSessionId},
+    };
+
+    let process_id = std::process::id();
+    let mut session_id = 0u32;
+    let process_session = unsafe { ProcessIdToSessionId(process_id, &mut session_id) };
+    let active_console_session = unsafe { WTSGetActiveConsoleSessionId() };
+
+    if process_session == FALSE {
+        format!(
+            "Агент Host работает. session_id=unknown active_console_session={active_console_session}"
+        )
+    } else {
+        format!(
+            "Агент Host работает. session_id={session_id} active_console_session={active_console_session}"
+        )
     }
 }
 

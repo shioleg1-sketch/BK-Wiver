@@ -71,7 +71,7 @@ begin
   );
   ExecAndLog(
     ExpandConstant('{sys}\schtasks.exe'),
-    '/Create /TN "{#MyAgentTaskName}" /TR ""' + HostExe + '"" --agent /SC ONLOGON /RL LIMITED /F',
+    '/Create /TN "{#MyAgentTaskName}" /TR ""' + HostExe + '"" --agent /SC ONLOGON /RL LIMITED /IT /F',
     ExpandConstant('{app}')
   );
   ExecAndLog(
