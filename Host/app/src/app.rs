@@ -228,7 +228,7 @@ fn run_agent_mode() {
 fn current_session_details() -> String {
     use windows_sys::Win32::{
         Foundation::FALSE,
-        System::{RemoteDesktop::WTSGetActiveConsoleSessionId, Threading::ProcessIdToSessionId},
+        System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId},
     };
 
     let process_id = std::process::id();
