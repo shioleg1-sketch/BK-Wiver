@@ -129,21 +129,21 @@ enum StreamQualityProfile {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StreamCodecPreference {
-    Jpeg,
+    H264,
     Vp8,
 }
 
 impl StreamCodecPreference {
     fn wire_name(self) -> &'static str {
         match self {
-            Self::Jpeg => "jpeg",
+            Self::H264 => "h264",
             Self::Vp8 => "vp8",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Jpeg => "JPEG",
+            Self::H264 => "H.264",
             Self::Vp8 => "VP8",
         }
     }
@@ -448,7 +448,7 @@ impl ConsoleApp {
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Sharp,
-            stream_codec_preference: StreamCodecPreference::Jpeg,
+            stream_codec_preference: StreamCodecPreference::H264,
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,
             last_synced_stream_codec: None,
@@ -762,7 +762,7 @@ impl ConsoleApp {
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Sharp;
-        self.stream_codec_preference = StreamCodecPreference::Jpeg;
+        self.stream_codec_preference = StreamCodecPreference::H264;
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;
         self.last_synced_stream_codec = None;
@@ -1005,24 +1005,48 @@ impl ConsoleApp {
                             self.media_changed_frame_count
                         ),
                     );
-                    let (Some(width), Some(height)) = (width, height) else {
-                        continue;
-                    };
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [width as usize, height as usize],
-                        &bytes,
-                    );
-                    if let Some(texture) = &mut self.session_texture {
-                        texture.set(color_image, egui::TextureOptions::LINEAR);
-                    } else {
-                        self.session_texture = Some(ctx.load_texture(
-                            "remote-session-frame",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                    match codec {
+                        MediaCodec::H264 => {
+                            let (Some(width), Some(height)) = (width, height) else {
+                                continue;
+                            };
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [width as usize, height as usize],
+                                &bytes,
+                            );
+                            if let Some(texture) = &mut self.session_texture {
+                                texture.set(color_image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.session_texture = Some(ctx.load_texture(
+                                    "remote-session-frame",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+                            self.media_connected_session_id = Some(session_id);
+                            ctx.request_repaint();
+                        }
+                        MediaCodec::Vp8 => {
+                            let (Some(width), Some(height)) = (width, height) else {
+                                continue;
+                            };
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [width as usize, height as usize],
+                                &bytes,
+                            );
+                            if let Some(texture) = &mut self.session_texture {
+                                texture.set(color_image, egui::TextureOptions::LINEAR);
+                            } else {
+                                self.session_texture = Some(ctx.load_texture(
+                                    "remote-session-frame",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+                            self.media_connected_session_id = Some(session_id);
+                            ctx.request_repaint();
+                        }
                     }
-                    self.media_connected_session_id = Some(session_id);
-                    ctx.request_repaint();
                 }
             }
         }
@@ -1445,7 +1469,7 @@ impl ConsoleApp {
                             });
                             ui.separator();
                             ui.label(match self.media_codec {
-                                Some(MediaCodec::Jpeg) => "codec jpeg",
+                                Some(MediaCodec::H264) => "codec h264",
                                 Some(MediaCodec::Vp8) => "codec vp8",
                                 None => "codec неизвестен",
                             });

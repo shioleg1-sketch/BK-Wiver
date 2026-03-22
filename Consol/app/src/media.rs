@@ -1,4 +1,5 @@
 use std::{
+    fs::File,
     env,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
@@ -12,6 +13,12 @@ use std::{
 };
 
 use crossbeam_channel::Sender;
+use openh264::{
+    NalParser,
+    decoder::Decoder,
+    formats::YUVSource,
+};
+use serde::Deserialize;
 use tungstenite::{Message, connect};
 use url::Url;
 
@@ -20,12 +27,13 @@ use crate::logging;
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
 const MEDIA_PACKET_HEADER_LEN: usize = 8;
 const IVF_HEADER_LEN: usize = 32;
+const H264_DUMP_LIMIT_BYTES: usize = 256 * 1024;
 const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
 const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodec {
-    Jpeg,
+    H264,
     Vp8,
 }
 
@@ -48,6 +56,90 @@ enum MediaPacketKind {
     Frame,
 }
 
+struct H264DecoderSession {
+    decoder: Decoder,
+    parser: NalParser,
+    session_id: String,
+    event_tx: Sender<MediaEvent>,
+    packet_write_count: u64,
+    decoded_frame_count: u64,
+}
+
+struct H264DumpSession {
+    file: File,
+    bytes_written: usize,
+    path: PathBuf,
+}
+
+impl H264DumpSession {
+    fn new(session_id: &str) -> Result<Self, String> {
+        let path = h264_dump_path(session_id);
+        let file = File::create(&path).map_err(|error| error.to_string())?;
+        Ok(Self {
+            file,
+            bytes_written: 0,
+            path,
+        })
+    }
+
+    fn write_packet(&mut self, bytes: &[u8], session_id: &str) {
+        if self.bytes_written >= H264_DUMP_LIMIT_BYTES {
+            return;
+        }
+        let remaining = H264_DUMP_LIMIT_BYTES.saturating_sub(self.bytes_written);
+        let chunk = &bytes[..bytes.len().min(remaining)];
+        if self.file.write_all(chunk).is_err() {
+            self.bytes_written = H264_DUMP_LIMIT_BYTES;
+            return;
+        }
+        self.bytes_written = self.bytes_written.saturating_add(chunk.len());
+        if self.bytes_written >= H264_DUMP_LIMIT_BYTES {
+            logging::append_log(
+                "INFO",
+                "media.h264_dump",
+                format!(
+                    "capture complete session_id={} bytes={} path={}",
+                    session_id,
+                    self.bytes_written,
+                    self.path.display()
+                ),
+            );
+        }
+    }
+}
+
+fn h264_dump_path(session_id: &str) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("BK-Wiver")
+            .join("state")
+            .join(format!("h264-dump-{session_id}.h264"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let local_app_data = env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        local_app_data
+            .join("BK-Wiver")
+            .join("state")
+            .join(format!("h264-dump-{session_id}.h264"))
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct H264Config {
+    width: u32,
+    height: u32,
+}
+
 struct Vp8DecoderSession {
     child: Child,
     stdin: ChildStdin,
@@ -65,6 +157,73 @@ struct Vp8FrameAssembler {
     buffer: Vec<u8>,
     expected_len: usize,
     received_len: usize,
+}
+
+impl H264DecoderSession {
+    fn new(
+        width: u32,
+        height: u32,
+        session_id: String,
+        event_tx: Sender<MediaEvent>,
+    ) -> Result<Self, String> {
+        logging::append_log(
+            "INFO",
+            "media.h264_decoder",
+            format!(
+                "starting decoder=openh264 width={} height={} session_id={}",
+                width, height, session_id
+            ),
+        );
+        Ok(Self {
+            decoder: Decoder::new().map_err(|error| error.to_string())?,
+            parser: NalParser::new(),
+            session_id,
+            event_tx,
+            packet_write_count: 0,
+            decoded_frame_count: 0,
+        })
+    }
+
+    fn push_packet(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.packet_write_count = self.packet_write_count.saturating_add(1);
+        self.parser.feed(bytes);
+        while let Some(nal) = self.parser.next() {
+            match self.decoder.decode(&nal) {
+                Ok(Some(yuv)) => {
+                    let (width, height) = yuv.dimensions();
+                    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+                    yuv.write_rgba8(&mut rgba);
+                    self.decoded_frame_count = self.decoded_frame_count.saturating_add(1);
+                    if self.decoded_frame_count == 1 || self.decoded_frame_count % 120 == 0 {
+                        logging::append_log(
+                            "INFO",
+                            "media.h264_decoder",
+                            format!(
+                                "decoded_frames={} session_id={}",
+                                self.decoded_frame_count, self.session_id
+                            ),
+                        );
+                    }
+                    let _ = self.event_tx.send(MediaEvent::Frame {
+                        session_id: self.session_id.clone(),
+                        codec: MediaCodec::H264,
+                        bytes: rgba,
+                        width: Some(width as u32),
+                        height: Some(height as u32),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "media.h264_decoder",
+                        format!("openh264 decode error session_id={} {}", self.session_id, error),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Vp8DecoderSession {
@@ -257,6 +416,10 @@ pub fn spawn_listener(
         while !stop_flag.load(Ordering::Relaxed) {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
+                    let mut h264_decoder: Option<H264DecoderSession> = None;
+                    let mut h264_dump: Option<H264DumpSession> = None;
+                    let mut h264_config: Option<H264Config> = None;
+                    let mut h264_packet_count = 0_u64;
                     let mut vp8_decoder: Option<Vp8DecoderSession> = None;
                     let mut vp8_frame_packet_count = 0_u64;
                     let mut vp8_sample_capture: Option<Vp8SampleCapture> = None;
@@ -277,30 +440,56 @@ pub fn spawn_listener(
                                     decode_media_packet(bytes.as_ref())
                                 {
                                     match (codec, kind) {
-                                        (MediaCodec::Jpeg, MediaPacketKind::Config) => {}
-                                        (MediaCodec::Jpeg, MediaPacketKind::Frame) => {
-                                            match image::load_from_memory(&payload) {
-                                                Ok(image) => {
-                                                    let rgba = image.to_rgba8();
-                                                    let width = rgba.width();
-                                                    let height = rgba.height();
-                                                    let _ = event_tx.send(MediaEvent::Frame {
-                                                        session_id: session_id.clone(),
-                                                        codec: MediaCodec::Jpeg,
-                                                        bytes: rgba.into_raw(),
-                                                        width: Some(width),
-                                                        height: Some(height),
-                                                    });
-                                                }
-                                                Err(error) => {
+                                        (MediaCodec::H264, MediaPacketKind::Config) => {
+                                            if let Ok(config) =
+                                                serde_json::from_slice::<H264Config>(&payload)
+                                            {
+                                                h264_config = Some(config);
+                                                h264_dump = H264DumpSession::new(&session_id).ok();
+                                                logging::append_log(
+                                                    "INFO",
+                                                    "media.h264_decoder",
+                                                    format!(
+                                                        "config received session_id={} width={} height={}",
+                                                        session_id, config.width, config.height
+                                                    ),
+                                                );
+                                                h264_decoder = ensure_h264_decoder(
+                                                    config.width,
+                                                    config.height,
+                                                    session_id.clone(),
+                                                    event_tx.clone(),
+                                                )
+                                                .ok();
+                                            }
+                                        }
+                                        (MediaCodec::H264, MediaPacketKind::Frame) => {
+                                            h264_packet_count = h264_packet_count.saturating_add(1);
+                                            if let Some(dump) = &mut h264_dump {
+                                                dump.write_packet(&payload, &session_id);
+                                            }
+                                            if h264_decoder.is_none()
+                                                && let Some(config) = h264_config
+                                            {
+                                                h264_decoder = ensure_h264_decoder(
+                                                    config.width,
+                                                    config.height,
+                                                    session_id.clone(),
+                                                    event_tx.clone(),
+                                                )
+                                                .ok();
+                                            }
+                                            if let Some(decoder) = &mut h264_decoder {
+                                                if let Err(error) = decoder.push_packet(&payload) {
                                                     logging::append_log(
-                                                        "WARN",
-                                                        "media.jpeg_decoder",
+                                                        "ERROR",
+                                                        "media.h264_decoder",
                                                         format!(
-                                                            "decode failed session_id={} error={}",
+                                                            "packet decode failed session_id={} error={}",
                                                             session_id, error
                                                         ),
                                                     );
+                                                    h264_decoder = None;
                                                 }
                                             }
                                         }
@@ -512,8 +701,8 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     }
 
     let codec = match bytes[5] {
-        1 => MediaCodec::Jpeg,
-        2 => MediaCodec::Vp8,
+        1 => MediaCodec::Vp8,
+        2 => MediaCodec::H264,
         _ => return None,
     };
     let kind = match bytes[6] {
@@ -523,6 +712,15 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
     };
 
     Some((codec, kind, bytes[MEDIA_PACKET_HEADER_LEN..].to_vec()))
+}
+
+fn ensure_h264_decoder(
+    width: u32,
+    height: u32,
+    session_id: String,
+    event_tx: Sender<MediaEvent>,
+) -> Result<H264DecoderSession, String> {
+    H264DecoderSession::new(width, height, session_id, event_tx)
 }
 
 fn parse_ivf_dimensions(header: &[u8]) -> Option<(u32, u32)> {
