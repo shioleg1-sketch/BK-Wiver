@@ -1,5 +1,6 @@
 use dxgi_capture_rs::{CaptureError, DXGIManager};
 use image::{ImageBuffer, RgbaImage};
+use std::time::Instant;
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
@@ -38,6 +39,8 @@ pub struct WindowsCaptureEngine {
     gdi_backend: Option<GdiCaptureBackend>,
     screenshots_fallback: ScreenshotsCaptureBackend,
     last_successful_frame: Option<RgbaImage>,
+    rdp_capture_scale: f32,
+    last_logged_rdp_scale: f32,
 }
 
 impl WindowsCaptureEngine {
@@ -89,6 +92,8 @@ impl WindowsCaptureEngine {
                 "windows-screenshots-fallback",
             ),
             last_successful_frame: None,
+            rdp_capture_scale: 1.0,
+            last_logged_rdp_scale: 1.0,
         }
     }
 
@@ -183,14 +188,70 @@ impl WindowsCaptureEngine {
     }
 
     fn capture_with_gdi(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
+        let effective_dimensions = self.effective_gdi_dimensions(max_dimensions);
+        let capture_started_at = Instant::now();
+
         if let Some(backend) = &mut self.gdi_backend {
-            return backend.capture(max_dimensions, self.strategy);
+            let image = backend.capture(effective_dimensions, self.strategy)?;
+            self.update_rdp_capture_scale(
+                max_dimensions,
+                effective_dimensions,
+                capture_started_at.elapsed().as_millis() as u32,
+            );
+            return Ok(image);
         }
 
         let mut backend = GdiCaptureBackend::new()?;
-        let result = backend.capture(max_dimensions, self.strategy);
+        let result = backend.capture(effective_dimensions, self.strategy);
         self.gdi_backend = Some(backend);
+        if result.is_ok() {
+            self.update_rdp_capture_scale(
+                max_dimensions,
+                effective_dimensions,
+                capture_started_at.elapsed().as_millis() as u32,
+            );
+        }
         result
+    }
+
+    fn effective_gdi_dimensions(&self, max_dimensions: (u32, u32)) -> (u32, u32) {
+        if self.strategy != WindowsCaptureStrategy::RemoteDesktop {
+            return max_dimensions;
+        }
+
+        scale_dimensions(max_dimensions, self.rdp_capture_scale)
+    }
+
+    fn update_rdp_capture_scale(
+        &mut self,
+        requested_dimensions: (u32, u32),
+        effective_dimensions: (u32, u32),
+        capture_ms: u32,
+    ) {
+        if self.strategy != WindowsCaptureStrategy::RemoteDesktop {
+            return;
+        }
+
+        let previous_scale = self.rdp_capture_scale;
+        self.rdp_capture_scale = next_rdp_capture_scale(previous_scale, capture_ms);
+
+        if (self.rdp_capture_scale - self.last_logged_rdp_scale).abs() >= 0.04 {
+            let next_dimensions = scale_dimensions(requested_dimensions, self.rdp_capture_scale);
+            logging::append_log(
+                "INFO",
+                "capture.rdp_policy",
+                format!(
+                    "capture_ms={} current={}x{} next={}x{} scale={:.2}",
+                    capture_ms,
+                    effective_dimensions.0,
+                    effective_dimensions.1,
+                    next_dimensions.0,
+                    next_dimensions.1,
+                    self.rdp_capture_scale
+                ),
+            );
+            self.last_logged_rdp_scale = self.rdp_capture_scale;
+        }
     }
 
     fn capture_with_screenshots(
@@ -577,4 +638,28 @@ fn capture_target_dimensions(
     let width = ((source_width as f32 * scale).round() as u32).max(1);
     let height = ((source_height as f32 * scale).round() as u32).max(1);
     (width, height)
+}
+
+fn scale_dimensions(dimensions: (u32, u32), scale: f32) -> (u32, u32) {
+    let scale = scale.clamp(0.1, 1.0);
+    (
+        ((dimensions.0 as f32 * scale).round() as u32).max(1),
+        ((dimensions.1 as f32 * scale).round() as u32).max(1),
+    )
+}
+
+fn next_rdp_capture_scale(current_scale: f32, capture_ms: u32) -> f32 {
+    let next_scale = if capture_ms > 85 {
+        current_scale * 0.92
+    } else if capture_ms > 65 {
+        current_scale * 0.96
+    } else if capture_ms < 36 {
+        current_scale * 1.03
+    } else if capture_ms < 45 {
+        current_scale * 1.015
+    } else {
+        current_scale
+    };
+
+    next_scale.clamp(0.72, 1.0)
 }
