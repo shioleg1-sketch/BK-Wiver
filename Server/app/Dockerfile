@@ -4,7 +4,10 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY Server/app/Cargo.toml Server/app/Cargo.toml
-RUN mkdir -p Server/app/src && echo "fn main() {}" > Server/app/src/main.rs
+COPY Host/app/Cargo.toml Host/app/Cargo.toml
+RUN mkdir -p Server/app/src Host/app/src && \
+    echo "fn main() {}" > Server/app/src/main.rs && \
+    echo "fn main() {}" > Host/app/src/main.rs
 RUN cargo build -p bk-wiver-server --release
 
 COPY Server/app/src Server/app/src
