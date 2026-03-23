@@ -3,11 +3,12 @@ use image::{ImageBuffer, RgbaImage};
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
-        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HBITMAP,
-        HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, COLORONCOLOR,
+        CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+        GetDC, GetDIBits, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
+        SetStretchBltMode, StretchBlt,
     },
-    UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
+    UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SM_REMOTESESSION},
 };
 
 use crate::logging;
@@ -24,7 +25,14 @@ enum WindowsCaptureBackendKind {
     ScreenshotsFallback,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsCaptureStrategy {
+    LocalDisplay,
+    RemoteDesktop,
+}
+
 pub struct WindowsCaptureEngine {
+    strategy: WindowsCaptureStrategy,
     preferred_backend: WindowsCaptureBackendKind,
     dxgi_backend: Option<DxgiCaptureBackend>,
     gdi_backend: Option<GdiCaptureBackend>,
@@ -34,16 +42,26 @@ pub struct WindowsCaptureEngine {
 
 impl WindowsCaptureEngine {
     pub fn new() -> Self {
-        let dxgi_backend = match DxgiCaptureBackend::new() {
-            Ok(backend) => Some(backend),
-            Err(error) => {
-                logging::append_log(
-                    "WARN",
-                    "capture.dxgi",
-                    format!("initialization failed: {}", error),
-                );
-                None
+        let strategy = detect_capture_strategy();
+        let dxgi_backend = if strategy == WindowsCaptureStrategy::LocalDisplay {
+            match DxgiCaptureBackend::new() {
+                Ok(backend) => Some(backend),
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "capture.dxgi",
+                        format!("initialization failed: {}", error),
+                    );
+                    None
+                }
             }
+        } else {
+            logging::append_log(
+                "INFO",
+                "capture",
+                "remote desktop session detected, preferring scaled GDI capture",
+            );
+            None
         };
 
         let gdi_backend = match GdiCaptureBackend::new() {
@@ -59,7 +77,12 @@ impl WindowsCaptureEngine {
         };
 
         Self {
-            preferred_backend: WindowsCaptureBackendKind::DxgiDuplication,
+            strategy,
+            preferred_backend: if strategy == WindowsCaptureStrategy::RemoteDesktop {
+                WindowsCaptureBackendKind::Win32Gdi
+            } else {
+                WindowsCaptureBackendKind::DxgiDuplication
+            },
             dxgi_backend,
             gdi_backend,
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
@@ -130,7 +153,15 @@ impl WindowsCaptureEngine {
             }
             WindowsCaptureBackendKind::Win32Gdi => {
                 match self.capture_with_gdi(max_dimensions) {
-                    Ok(image) => self.capture_frame(image, "windows-gdi", false),
+                    Ok(image) => {
+                        let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop
+                        {
+                            "windows-rdp-gdi"
+                        } else {
+                            "windows-gdi"
+                        };
+                        self.capture_frame(image, backend_name, false)
+                    }
                     Err(error) => {
                         logging::append_log(
                             "WARN",
@@ -153,11 +184,11 @@ impl WindowsCaptureEngine {
 
     fn capture_with_gdi(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
         if let Some(backend) = &mut self.gdi_backend {
-            return backend.capture(max_dimensions);
+            return backend.capture(max_dimensions, self.strategy);
         }
 
         let mut backend = GdiCaptureBackend::new()?;
-        let result = backend.capture(max_dimensions);
+        let result = backend.capture(max_dimensions, self.strategy);
         self.gdi_backend = Some(backend);
         result
     }
@@ -208,7 +239,7 @@ impl WindowsCaptureEngine {
     }
 
     fn try_restore_primary_backends(&mut self) {
-        if self.dxgi_backend.is_none() {
+        if self.strategy == WindowsCaptureStrategy::LocalDisplay && self.dxgi_backend.is_none() {
             self.dxgi_backend = match DxgiCaptureBackend::new() {
                 Ok(backend) => Some(backend),
                 Err(error) => {
@@ -240,7 +271,12 @@ impl WindowsCaptureEngine {
             logging::append_log("INFO", "capture", "retrying primary backend windows-dxgi");
             self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
         } else if self.gdi_backend.is_some() {
-            logging::append_log("INFO", "capture", "retrying primary backend windows-gdi");
+            let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop {
+                "windows-rdp-gdi"
+            } else {
+                "windows-gdi"
+            };
+            logging::append_log("INFO", "capture", format!("retrying backend {backend_name}"));
             self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
         }
     }
@@ -295,50 +331,87 @@ struct GdiCaptureBackend {
     memory_dc: HDC,
     bitmap: HBITMAP,
     previous: HGDIOBJ,
-    width: i32,
-    height: i32,
+    source_width: i32,
+    source_height: i32,
+    capture_width: i32,
+    capture_height: i32,
     bgra: Vec<u8>,
 }
 
 impl GdiCaptureBackend {
     fn new() -> Result<Self, String> {
-        let (width, height) = current_screen_size()?;
-        Self::create(width, height)
+        let (source_width, source_height) = current_screen_size()?;
+        Self::create(source_width, source_height, source_width, source_height)
     }
 
-    fn capture(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
-        let (width, height) = current_screen_size()?;
-        if width != self.width || height != self.height {
-            let replacement = Self::create(width, height)?;
+    fn capture(
+        &mut self,
+        max_dimensions: (u32, u32),
+        strategy: WindowsCaptureStrategy,
+    ) -> Result<RgbaImage, String> {
+        let (source_width, source_height) = current_screen_size()?;
+        let (capture_width, capture_height) =
+            desired_capture_size(source_width, source_height, max_dimensions, strategy);
+
+        if source_width != self.source_width
+            || source_height != self.source_height
+            || capture_width != self.capture_width
+            || capture_height != self.capture_height
+        {
+            let replacement =
+                Self::create(source_width, source_height, capture_width, capture_height)?;
             *self = replacement;
         }
 
-        let blt_ok = unsafe {
-            BitBlt(
-                self.memory_dc,
-                0,
-                0,
-                self.width,
-                self.height,
-                self.screen_dc,
-                0,
-                0,
-                SRCCOPY | CAPTUREBLT,
-            )
+        let blt_ok = if strategy == WindowsCaptureStrategy::RemoteDesktop {
+            unsafe {
+                SetStretchBltMode(self.memory_dc, COLORONCOLOR);
+                StretchBlt(
+                    self.memory_dc,
+                    0,
+                    0,
+                    self.capture_width,
+                    self.capture_height,
+                    self.screen_dc,
+                    0,
+                    0,
+                    self.source_width,
+                    self.source_height,
+                    SRCCOPY | CAPTUREBLT,
+                )
+            }
+        } else {
+            unsafe {
+                BitBlt(
+                    self.memory_dc,
+                    0,
+                    0,
+                    self.capture_width,
+                    self.capture_height,
+                    self.screen_dc,
+                    0,
+                    0,
+                    SRCCOPY | CAPTUREBLT,
+                )
+            }
         };
         if blt_ok == 0 {
-            return Err("BitBlt failed".to_owned());
+            return Err(if strategy == WindowsCaptureStrategy::RemoteDesktop {
+                "StretchBlt failed".to_owned()
+            } else {
+                "BitBlt failed".to_owned()
+            });
         }
 
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: self.width,
-                biHeight: -self.height,
+                biWidth: self.capture_width,
+                biHeight: -self.capture_height,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB,
-                biSizeImage: (self.width * self.height * 4) as u32,
+                biSizeImage: (self.capture_width * self.capture_height * 4) as u32,
                 biXPelsPerMeter: 0,
                 biYPelsPerMeter: 0,
                 biClrUsed: 0,
@@ -352,7 +425,7 @@ impl GdiCaptureBackend {
                 self.memory_dc,
                 self.bitmap,
                 0,
-                self.height as u32,
+                self.capture_height as u32,
                 self.bgra.as_mut_ptr() as *mut _,
                 &mut info,
                 DIB_RGB_COLORS,
@@ -368,12 +441,23 @@ impl GdiCaptureBackend {
             pixel.swap(0, 2);
         }
 
-        let image = ImageBuffer::from_raw(self.width as u32, self.height as u32, rgba)
+        let image = ImageBuffer::from_raw(self.capture_width as u32, self.capture_height as u32, rgba)
             .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
-        Ok(fit_frame(image, max_dimensions))
+        Ok(if self.capture_width as u32 == max_dimensions.0
+            && self.capture_height as u32 == max_dimensions.1
+        {
+            image
+        } else {
+            fit_frame(image, max_dimensions)
+        })
     }
 
-    fn create(width: i32, height: i32) -> Result<Self, String> {
+    fn create(
+        source_width: i32,
+        source_height: i32,
+        capture_width: i32,
+        capture_height: i32,
+    ) -> Result<Self, String> {
         let screen_dc = unsafe { GetDC(0 as HWND) };
         if screen_dc.is_null() {
             return Err("GetDC failed".to_owned());
@@ -387,7 +471,7 @@ impl GdiCaptureBackend {
             return Err("CreateCompatibleDC failed".to_owned());
         }
 
-        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, width, height) };
+        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, capture_width, capture_height) };
         if bitmap.is_null() {
             unsafe {
                 DeleteDC(memory_dc);
@@ -411,9 +495,11 @@ impl GdiCaptureBackend {
             memory_dc,
             bitmap,
             previous,
-            width,
-            height,
-            bgra: vec![0_u8; (width as usize) * (height as usize) * 4],
+            source_width,
+            source_height,
+            capture_width,
+            capture_height,
+            bgra: vec![0_u8; (capture_width as usize) * (capture_height as usize) * 4],
         })
     }
 }
@@ -448,4 +534,47 @@ fn current_screen_size() -> Result<(i32, i32), String> {
 
 fn should_retry_dxgi(error: &str) -> bool {
     error.contains("timeout before first frame") || error.contains("access lost before first frame")
+}
+
+fn detect_capture_strategy() -> WindowsCaptureStrategy {
+    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 {
+        WindowsCaptureStrategy::RemoteDesktop
+    } else {
+        WindowsCaptureStrategy::LocalDisplay
+    }
+}
+
+fn desired_capture_size(
+    source_width: i32,
+    source_height: i32,
+    max_dimensions: (u32, u32),
+    strategy: WindowsCaptureStrategy,
+) -> (i32, i32) {
+    if strategy != WindowsCaptureStrategy::RemoteDesktop {
+        return (source_width, source_height);
+    }
+
+    if source_width <= 0 || source_height <= 0 {
+        return (1, 1);
+    }
+
+    let target = capture_target_dimensions(source_width as u32, source_height as u32, max_dimensions);
+    (target.0.max(1) as i32, target.1.max(1) as i32)
+}
+
+fn capture_target_dimensions(
+    source_width: u32,
+    source_height: u32,
+    max_dimensions: (u32, u32),
+) -> (u32, u32) {
+    if max_dimensions.0 == 0 || max_dimensions.1 == 0 {
+        return (source_width.max(1), source_height.max(1));
+    }
+
+    let scale = (max_dimensions.0 as f32 / source_width as f32)
+        .min(max_dimensions.1 as f32 / source_height as f32);
+
+    let width = ((source_width as f32 * scale).round() as u32).max(1);
+    let height = ((source_height as f32 * scale).round() as u32).max(1);
+    (width, height)
 }
