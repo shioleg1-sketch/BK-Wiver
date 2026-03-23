@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${1:-/opt/bk-wiver}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGE_ROOT="$SCRIPT_DIR"
+REPO_ROOT="${1:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 COMPOSE_ARGS=(-f docker-compose.yml -f Server/deploy/docker-compose.lan.yml)
 
 log() {
@@ -21,6 +23,17 @@ require_file() {
 require_cmd() {
   local cmd="$1"
   command -v "$cmd" >/dev/null 2>&1 || fail "required command is not installed: $cmd"
+}
+
+sync_file() {
+  local source_path="$1"
+  local target_path="$2"
+
+  [[ -f "$source_path" ]] || fail "missing update package file: $source_path"
+
+  mkdir -p "$(dirname "$target_path")"
+  cp "$source_path" "$target_path"
+  log "synced $(realpath --relative-to="$REPO_ROOT" "$target_path" 2>/dev/null || printf '%s' "$target_path")"
 }
 
 check_media_route() {
@@ -55,17 +68,27 @@ require_cmd curl
 cd "$REPO_ROOT"
 
 require_file ".env"
-require_file "docker-compose.yml"
-require_file "Server/deploy/docker-compose.lan.yml"
-require_file "Server/app/Dockerfile"
-require_file "Server/app/Cargo.toml"
-require_file "Server/app/src/main.rs"
-require_file "Server/app/src/server.rs"
-require_file "Cargo.toml"
-require_file "Cargo.lock"
+require_file "${PACKAGE_ROOT}/Cargo.toml"
+require_file "${PACKAGE_ROOT}/Cargo.lock"
+require_file "${PACKAGE_ROOT}/docker-compose.yml"
+require_file "${PACKAGE_ROOT}/apps/server/Cargo.toml"
+require_file "${PACKAGE_ROOT}/apps/server/Dockerfile"
+require_file "${PACKAGE_ROOT}/apps/server/src/main.rs"
+require_file "${PACKAGE_ROOT}/apps/server/src/server.rs"
+require_file "${PACKAGE_ROOT}/deploy/ubuntu/docker-compose.lan.yml"
 
 log "repo root: $REPO_ROOT"
-log "using files already present in the repo directory"
+log "update package root: $PACKAGE_ROOT"
+log "syncing packaged files into the repo"
+
+sync_file "${PACKAGE_ROOT}/Cargo.toml" "${REPO_ROOT}/Cargo.toml"
+sync_file "${PACKAGE_ROOT}/Cargo.lock" "${REPO_ROOT}/Cargo.lock"
+sync_file "${PACKAGE_ROOT}/docker-compose.yml" "${REPO_ROOT}/docker-compose.yml"
+sync_file "${PACKAGE_ROOT}/apps/server/Cargo.toml" "${REPO_ROOT}/Server/app/Cargo.toml"
+sync_file "${PACKAGE_ROOT}/apps/server/Dockerfile" "${REPO_ROOT}/Server/app/Dockerfile"
+sync_file "${PACKAGE_ROOT}/apps/server/src/main.rs" "${REPO_ROOT}/Server/app/src/main.rs"
+sync_file "${PACKAGE_ROOT}/apps/server/src/server.rs" "${REPO_ROOT}/Server/app/src/server.rs"
+sync_file "${PACKAGE_ROOT}/deploy/ubuntu/docker-compose.lan.yml" "${REPO_ROOT}/Server/deploy/docker-compose.lan.yml"
 
 SERVER_PUBLIC_URL="$(grep -E '^SERVER_PUBLIC_URL=' .env | tail -n 1 | cut -d '=' -f 2- || true)"
 [[ -n "$SERVER_PUBLIC_URL" ]] || fail "SERVER_PUBLIC_URL is not set in .env"
@@ -90,6 +113,12 @@ printf '\n'
 log "checking public health: ${SERVER_PUBLIC_URL}/healthz"
 curl --fail --silent --show-error "${SERVER_PUBLIC_URL}/healthz"
 printf '\n'
+
+log "checking local admin page: http://127.0.0.1:8080/admin"
+curl --fail --silent --show-error http://127.0.0.1:8080/admin >/dev/null
+
+log "checking public admin page: ${SERVER_PUBLIC_URL}/admin"
+curl --fail --silent --show-error "${SERVER_PUBLIC_URL}/admin" >/dev/null
 
 log "checking local media route: http://127.0.0.1:8080/ws/v1/media"
 check_media_route "local" "http://127.0.0.1:8080"

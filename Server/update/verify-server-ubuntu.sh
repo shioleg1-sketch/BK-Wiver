@@ -120,6 +120,13 @@ check_status \
   200
 
 check_status \
+  "admin web ui" \
+  GET \
+  "${BASE_URL}/admin" \
+  "" \
+  200
+
+check_status \
   "user login route" \
   POST \
   "${BASE_URL}/api/v1/auth/login" \
@@ -194,6 +201,20 @@ check_status \
   POST \
   "${BASE_URL}/api/v1/admin/enrollment-tokens" \
   '{"comment":"probe","expiresAtMs":1771000000000,"singleUse":true}' \
+  401 403
+
+check_status \
+  "admin enrollment list route" \
+  GET \
+  "${BASE_URL}/api/v1/admin/enrollment-tokens" \
+  "" \
+  401 403
+
+check_status \
+  "admin audit route" \
+  GET \
+  "${BASE_URL}/api/v1/admin/audit?limit=1" \
+  "" \
   401 403
 
 check_ws_route \

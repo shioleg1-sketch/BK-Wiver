@@ -46,7 +46,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/admin/users/{user_id}", patch(update_user))
         .route(
             "/api/v1/admin/enrollment-tokens",
-            post(create_admin_enrollment_token),
+            get(list_admin_enrollment_tokens).post(create_admin_enrollment_token),
         )
         .route("/api/v1/admin/audit", get(list_audit_events))
         .with_state(state)
@@ -278,8 +278,27 @@ struct EnrollmentTokenSummary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct EnrollmentTokenDetailsSummary {
+    token_id: String,
+    token: String,
+    comment: String,
+    expires_at_ms: u64,
+    single_use: bool,
+    created_by_user_id: String,
+    created_at_ms: u64,
+    used_at_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateEnrollmentTokenResponse {
     enrollment_token: EnrollmentTokenSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListEnrollmentTokensResponse {
+    enrollment_tokens: Vec<EnrollmentTokenDetailsSummary>,
 }
 
 #[derive(Deserialize, Default)]
@@ -374,6 +393,18 @@ struct UserRecord {
     last_login_at_ms: i64,
     desktop_version: String,
     desktop_commit: String,
+}
+
+#[derive(FromRow)]
+struct EnrollmentTokenRecord {
+    token_id: String,
+    token: String,
+    comment: String,
+    expires_at_ms: i64,
+    single_use: bool,
+    created_by_user_id: String,
+    created_at_ms: i64,
+    used_at_ms: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -1341,6 +1372,39 @@ async fn create_admin_enrollment_token(
 ) -> Result<Json<CreateEnrollmentTokenResponse>, ApiError> {
     let _admin_id = authorize_admin_access_token(&state, &headers).await?;
     create_enrollment_token(State(state), headers, Json(request)).await
+}
+
+async fn list_admin_enrollment_tokens(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ListEnrollmentTokensResponse>, ApiError> {
+    let _admin_id = authorize_admin_access_token(&state, &headers).await?;
+
+    let records = sqlx::query_as::<_, EnrollmentTokenRecord>(
+        r#"
+        SELECT
+            token_id,
+            token,
+            comment,
+            expires_at_ms,
+            single_use,
+            created_by_user_id,
+            created_at_ms,
+            used_at_ms
+        FROM enrollment_tokens
+        ORDER BY created_at_ms DESC, token_id DESC
+        "#
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| ApiError::internal(format!("failed to list enrollment tokens: {error}")))?;
+
+    let enrollment_tokens = records
+        .into_iter()
+        .map(EnrollmentTokenDetailsSummary::from)
+        .collect();
+
+    Ok(Json(ListEnrollmentTokensResponse { enrollment_tokens }))
 }
 
 async fn list_audit_events(
@@ -2335,6 +2399,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       --accent-2: #b45309;
       --danger: #b91c1c;
       --soft: #ece4d6;
+      --soft-2: #f7efe3;
     }
     * { box-sizing: border-box; }
     body {
@@ -2346,7 +2411,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
         linear-gradient(135deg, #efe8db, #f8f5ee 55%, #ece7de);
     }
     .shell {
-      max-width: 1400px;
+      max-width: 1480px;
       margin: 0 auto;
       padding: 24px;
     }
@@ -2356,6 +2421,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       gap: 20px;
       align-items: end;
       margin-bottom: 20px;
+      flex-wrap: wrap;
     }
     .hero h1 {
       margin: 0;
@@ -2366,7 +2432,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
     .hero p {
       margin: 8px 0 0;
       color: var(--muted);
-      max-width: 700px;
+      max-width: 780px;
     }
     .panel {
       background: rgba(255,253,247,0.9);
@@ -2377,7 +2443,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
     }
     .login, .toolbar, .content { padding: 18px; }
     .toolbar, .content { margin-top: 18px; }
-    .login-grid, .filters {
+    .login-grid, .filters, .token-form {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
@@ -2416,14 +2482,31 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       background: var(--accent-2);
       border-color: var(--accent-2);
     }
+    button.tab {
+      width: auto;
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--line);
+      min-width: 140px;
+    }
+    button.tab.active {
+      background: var(--ink);
+      color: white;
+      border-color: var(--ink);
+    }
     button:disabled { opacity: .5; cursor: default; }
     button:hover:not(:disabled) { transform: translateY(-1px); }
-    .toolbar-head {
+    .toolbar-head, .section-head {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 16px;
       margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .tabs {
+      display: flex;
+      gap: 10px;
       flex-wrap: wrap;
     }
     .status {
@@ -2466,18 +2549,65 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       color: #19634b;
       white-space: nowrap;
     }
-    .pill.offline {
+    .pill.offline, .pill.blocked, .pill.used {
       background: #e7e5e4;
       color: #57534e;
+    }
+    .pill.warn {
+      background: #ffedd5;
+      color: #9a3412;
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .metric {
+      padding: 14px;
+      border: 1px solid #e8ddcc;
+      border-radius: 16px;
+      background: var(--soft-2);
+    }
+    .metric strong {
+      display: block;
+      font-size: 26px;
+      line-height: 1.1;
+      margin-bottom: 6px;
     }
     .muted { color: var(--muted); }
     .row-actions {
       display: flex;
       gap: 8px;
-      min-width: 120px;
+      min-width: 140px;
+      flex-wrap: wrap;
     }
     .row-actions button { padding: 9px 10px; }
+    .page { display: none; }
+    .page.active { display: block; }
     .hidden { display: none; }
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: white;
+      padding: 0 12px;
+    }
+    .checkbox input {
+      width: auto;
+      margin: 0;
+    }
+    .small {
+      font-size: 12px;
+    }
+    @media (max-width: 900px) {
+      .shell { padding: 16px; }
+      .hero h1 { font-size: 30px; }
+      table { min-width: 900px; }
+    }
   </style>
 </head>
 <body>
@@ -2485,7 +2615,7 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
     <div class="hero">
       <div>
         <h1>BK-Wiver Admin</h1>
-        <p>Inventory, groups, departments and locations for every host. Designed as a server-side admin surface without a separate frontend build pipeline.</p>
+        <p>Operational console for inventory, user access, audit history and enrollment tokens. Everything is served directly by the Rust server so Ubuntu deployment stays simple.</p>
       </div>
       <div class="status" id="authState">Not signed in</div>
     </div>
@@ -2510,70 +2640,231 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
     <section class="panel toolbar hidden" id="toolbarPanel">
       <div class="toolbar-head">
         <div>
-          <strong id="deviceCount">0 devices</strong>
+          <strong id="pageTitle">Computers</strong>
           <div class="status" id="toolbarStatus">Ready</div>
         </div>
         <div class="row-actions">
           <button class="secondary" id="refreshBtn">Refresh</button>
           <button class="warn" id="exportBtn">Export CSV</button>
+          <button class="secondary" id="logoutBtn">Logout</button>
         </div>
       </div>
-      <div class="filters">
-        <div>
-          <label for="search">Search</label>
-          <input id="search" placeholder="Hostname, user, CPU, group">
-        </div>
-        <div>
-          <label for="groupFilter">Group</label>
-          <select id="groupFilter"><option value="">All groups</option></select>
-        </div>
-        <div>
-          <label for="departmentFilter">Department</label>
-          <select id="departmentFilter"><option value="">All departments</option></select>
-        </div>
-        <div>
-          <label for="locationFilter">Location</label>
-          <select id="locationFilter"><option value="">All locations</option></select>
-        </div>
-        <div>
-          <label for="onlineFilter">Status</label>
-          <select id="onlineFilter">
-            <option value="">All</option>
-            <option value="online">Online</option>
-            <option value="offline">Offline</option>
-          </select>
-        </div>
+      <div class="tabs">
+        <button class="tab active" data-view="computers">Computers</button>
+        <button class="tab" data-view="users">Users</button>
+        <button class="tab" data-view="audit">Audit</button>
+        <button class="tab" data-view="tokens">Tokens</button>
       </div>
     </section>
 
     <section class="panel content hidden" id="contentPanel">
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Computer</th>
-              <th>Group</th>
-              <th>Department</th>
-              <th>Location</th>
-              <th>Hardware</th>
-              <th>Network</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="deviceTable"></tbody>
-        </table>
+      <div class="page active" id="page-computers">
+        <div class="filters">
+          <div>
+            <label for="search">Search</label>
+            <input id="search" placeholder="Hostname, user, CPU, group">
+          </div>
+          <div>
+            <label for="groupFilter">Group</label>
+            <select id="groupFilter"><option value="">All groups</option></select>
+          </div>
+          <div>
+            <label for="departmentFilter">Department</label>
+            <select id="departmentFilter"><option value="">All departments</option></select>
+          </div>
+          <div>
+            <label for="locationFilter">Location</label>
+            <select id="locationFilter"><option value="">All locations</option></select>
+          </div>
+          <div>
+            <label for="onlineFilter">Status</label>
+            <select id="onlineFilter">
+              <option value="">All</option>
+              <option value="online">Online</option>
+              <option value="offline">Offline</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="metric"><strong id="metricDevices">0</strong><span class="muted">Devices</span></div>
+          <div class="metric"><strong id="metricOnline">0</strong><span class="muted">Online now</span></div>
+          <div class="metric"><strong id="metricGroups">0</strong><span class="muted">Groups</span></div>
+          <div class="metric"><strong id="metricLocations">0</strong><span class="muted">Locations</span></div>
+        </div>
+        <div class="table-wrap" style="margin-top:14px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Computer</th>
+                <th>Group</th>
+                <th>Department</th>
+                <th>Location</th>
+                <th>Hardware</th>
+                <th>Network</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="deviceTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page" id="page-users">
+        <div class="section-head">
+          <div>
+            <strong id="userCount">0 users</strong>
+            <div class="muted small">Role management and blocking for desktop operators.</div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Login</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Desktop Version</th>
+                <th>Last Login</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="userTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page" id="page-audit">
+        <div class="section-head">
+          <div>
+            <strong id="auditCount">0 events</strong>
+            <div class="muted small">Recent administrative and operational changes.</div>
+          </div>
+          <div style="min-width:180px;">
+            <label for="auditLimit">Audit Depth</label>
+            <select id="auditLimit">
+              <option value="100">100 events</option>
+              <option value="250">250 events</option>
+              <option value="500">500 events</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>Event ID</th>
+              </tr>
+            </thead>
+            <tbody id="auditTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page" id="page-tokens">
+        <div class="section-head">
+          <div>
+            <strong id="tokenCount">0 tokens</strong>
+            <div class="muted small">Enrollment tokens for host installation and provisioning.</div>
+          </div>
+        </div>
+        <div class="token-form" style="margin-bottom:16px;">
+          <div>
+            <label for="tokenComment">Comment</label>
+            <input id="tokenComment" placeholder="Moscow office / QA / batch 03">
+          </div>
+          <div>
+            <label for="tokenExpiresDays">Expires In</label>
+            <select id="tokenExpiresDays">
+              <option value="1">1 day</option>
+              <option value="7" selected>7 days</option>
+              <option value="30">30 days</option>
+              <option value="90">90 days</option>
+            </select>
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <div class="checkbox">
+              <input id="tokenSingleUse" type="checkbox" checked>
+              <span>Single-use token</span>
+            </div>
+          </div>
+          <div>
+            <button id="createTokenBtn">Create Token</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Comment</th>
+                <th>Token</th>
+                <th>Created By</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>Used</th>
+              </tr>
+            </thead>
+            <tbody id="tokenTable"></tbody>
+          </table>
+        </div>
       </div>
     </section>
   </div>
 
   <script>
-    const state = { token: "", devices: [] };
+    const state = {
+      token: "",
+      activeView: "computers",
+      devices: [],
+      users: [],
+      events: [],
+      tokens: []
+    };
     const ids = (id) => document.getElementById(id);
 
     function setStatus(target, message, kind = "") {
       target.textContent = message;
       target.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function pageTitle(view) {
+      return {
+        computers: "Computers",
+        users: "Users",
+        audit: "Audit",
+        tokens: "Tokens"
+      }[view] || "Admin";
+    }
+
+    function setView(view) {
+      state.activeView = view;
+      ids("pageTitle").textContent = pageTitle(view);
+      document.querySelectorAll(".tab").forEach((button) => {
+        button.classList.toggle("active", button.dataset.view === view);
+      });
+      document.querySelectorAll(".page").forEach((page) => {
+        page.classList.toggle("active", page.id === `page-${view}`);
+      });
+      ids("exportBtn").classList.toggle("hidden", view !== "computers");
+    }
+
+    async function apiFetch(url, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (state.token) {
+        headers.Authorization = "Bearer " + state.token;
+      }
+      const response = await fetch(url, { ...options, headers });
+      if (response.status === 401 || response.status === 403) {
+        logout(true);
+        throw new Error("Admin session expired");
+      }
+      return response;
     }
 
     async function login() {
@@ -2595,25 +2886,80 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       ids("toolbarPanel").classList.remove("hidden");
       ids("contentPanel").classList.remove("hidden");
       setStatus(ids("authState"), "Admin session active", "ok");
-      await refreshDevices();
+      await refreshAll();
     }
 
-    async function refreshDevices() {
-      setStatus(ids("toolbarStatus"), "Loading devices...");
-      const response = await fetch("/api/v1/admin/devices", {
-        headers: { Authorization: "Bearer " + state.token }
-      });
+    function logout(expired = false) {
+      localStorage.removeItem("bk_admin_token");
+      state.token = "";
+      ids("loginPanel").classList.remove("hidden");
+      ids("toolbarPanel").classList.add("hidden");
+      ids("contentPanel").classList.add("hidden");
+      setStatus(ids("authState"), expired ? "Session expired" : "Not signed in", expired ? "error" : "");
+    }
+
+    async function refreshAll() {
+      setStatus(ids("toolbarStatus"), "Refreshing data...");
+      await Promise.all([
+        refreshDevices(false),
+        refreshUsers(false),
+        refreshAudit(false),
+        refreshTokens(false)
+      ]);
+      setStatus(ids("toolbarStatus"), "All admin views are up to date", "ok");
+    }
+
+    async function refreshDevices(updateStatus = true) {
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading devices...");
+      const response = await apiFetch("/api/v1/admin/devices");
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload?.error?.message || "Failed to load devices");
       }
       state.devices = payload.devices || [];
-      hydrateFilters();
-      renderTable();
-      setStatus(ids("toolbarStatus"), "Inventory loaded", "ok");
+      hydrateDeviceFilters();
+      renderDevices();
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Devices loaded", "ok");
     }
 
-    function hydrateFilters() {
+    async function refreshUsers(updateStatus = true) {
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading users...");
+      const response = await apiFetch("/api/v1/admin/users");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "Failed to load users");
+      }
+      state.users = payload.users || [];
+      renderUsers();
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Users loaded", "ok");
+    }
+
+    async function refreshAudit(updateStatus = true) {
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading audit...");
+      const limit = ids("auditLimit").value || "100";
+      const response = await apiFetch(`/api/v1/admin/audit?limit=${encodeURIComponent(limit)}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "Failed to load audit");
+      }
+      state.events = payload.events || [];
+      renderAudit();
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Audit loaded", "ok");
+    }
+
+    async function refreshTokens(updateStatus = true) {
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading tokens...");
+      const response = await apiFetch("/api/v1/admin/enrollment-tokens");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "Failed to load enrollment tokens");
+      }
+      state.tokens = payload.enrollmentTokens || [];
+      renderTokens();
+      if (updateStatus) setStatus(ids("toolbarStatus"), "Tokens loaded", "ok");
+    }
+
+    function hydrateDeviceFilters() {
       fillSelect("groupFilter", uniqueValues(state.devices.map(item => item.groupName)));
       fillSelect("departmentFilter", uniqueValues(state.devices.map(item => item.department)));
       fillSelect("locationFilter", uniqueValues(state.devices.map(item => item.location)));
@@ -2659,13 +3005,16 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       });
     }
 
-    function renderTable() {
+    function renderDevices() {
       const devices = filteredDevices();
-      ids("deviceCount").textContent = `${devices.length} devices`;
-      ids("deviceTable").innerHTML = devices.map((device) => rowHtml(device)).join("");
+      ids("metricDevices").textContent = String(state.devices.length);
+      ids("metricOnline").textContent = String(state.devices.filter(device => device.online).length);
+      ids("metricGroups").textContent = String(uniqueValues(state.devices.map(device => device.groupName)).length);
+      ids("metricLocations").textContent = String(uniqueValues(state.devices.map(device => device.location)).length);
+      ids("deviceTable").innerHTML = devices.map((device) => deviceRowHtml(device)).join("");
     }
 
-    function rowHtml(device) {
+    function deviceRowHtml(device) {
       const statusClass = device.online ? "" : " offline";
       const host = device.hostInfo || {};
       return `
@@ -2690,24 +3039,92 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
           </td>
           <td>
             <div class="row-actions">
-              <button class="secondary" onclick="saveRow('${escapeJs(device.deviceId)}')">Save</button>
+              <button class="secondary" onclick="saveDevice('${escapeJs(device.deviceId)}')">Save</button>
             </div>
           </td>
         </tr>
       `;
     }
 
-    async function saveRow(deviceId) {
+    function renderUsers() {
+      ids("userCount").textContent = `${state.users.length} users`;
+      ids("userTable").innerHTML = state.users.map((user) => `
+        <tr>
+          <td>
+            <strong>${escapeHtml(user.login)}</strong><br>
+            <span class="muted">${escapeHtml(user.userId)}</span>
+          </td>
+          <td>
+            <select data-user-role="${escapeHtml(user.userId)}">
+              <option value="operator" ${user.role === "operator" ? "selected" : ""}>operator</option>
+              <option value="viewer" ${user.role === "viewer" ? "selected" : ""}>viewer</option>
+            </select>
+          </td>
+          <td><span class="pill${user.blocked ? " blocked" : ""}">${user.blocked ? "Blocked" : "Active"}</span></td>
+          <td>
+            <strong>${escapeHtml(user.desktopVersion?.version || "")}</strong><br>
+            <span class="muted">${escapeHtml(user.desktopVersion?.commit || "")}</span>
+          </td>
+          <td>${escapeHtml(formatDate(user.lastLoginAtMs))}</td>
+          <td>
+            <div class="row-actions">
+              <button class="secondary" onclick="saveUser('${escapeJs(user.userId)}')">Save</button>
+              <button class="warn" onclick="toggleUserBlock('${escapeJs(user.userId)}', ${user.blocked ? "false" : "true"})">${user.blocked ? "Unblock" : "Block"}</button>
+            </div>
+          </td>
+        </tr>
+      `).join("");
+    }
+
+    function renderAudit() {
+      ids("auditCount").textContent = `${state.events.length} events`;
+      ids("auditTable").innerHTML = state.events.map((event) => `
+        <tr>
+          <td>${escapeHtml(formatDate(event.createdAtMs))}</td>
+          <td>
+            <strong>${escapeHtml(event.actorType)}</strong><br>
+            <span class="muted">${escapeHtml(event.actorId)}</span>
+          </td>
+          <td>${escapeHtml(event.action)}</td>
+          <td>
+            <strong>${escapeHtml(event.targetType)}</strong><br>
+            <span class="muted">${escapeHtml(event.targetId)}</span>
+          </td>
+          <td><span class="muted">${escapeHtml(event.eventId)}</span></td>
+        </tr>
+      `).join("");
+    }
+
+    function renderTokens() {
+      ids("tokenCount").textContent = `${state.tokens.length} tokens`;
+      ids("tokenTable").innerHTML = state.tokens.map((token) => {
+        const status = token.usedAtMs ? "Used" : (token.expiresAtMs < Date.now() ? "Expired" : "Active");
+        const statusClass = token.usedAtMs ? " used" : (token.expiresAtMs < Date.now() ? " warn" : "");
+        return `
+          <tr>
+            <td><span class="pill${statusClass}">${escapeHtml(status)}</span></td>
+            <td>
+              <strong>${escapeHtml(token.comment)}</strong><br>
+              <span class="muted">${token.singleUse ? "single-use" : "multi-use"}</span>
+            </td>
+            <td><span class="muted">${escapeHtml(token.token)}</span></td>
+            <td>${escapeHtml(token.createdByUserId)}</td>
+            <td>${escapeHtml(formatDate(token.createdAtMs))}</td>
+            <td>${escapeHtml(formatDate(token.expiresAtMs))}</td>
+            <td>${escapeHtml(token.usedAtMs ? formatDate(token.usedAtMs) : "Not used")}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function saveDevice(deviceId) {
       const payload = {};
       document.querySelectorAll(`[data-id="${CSS.escape(deviceId)}"]`).forEach((input) => {
         payload[input.dataset.field] = input.value.trim() || null;
       });
-      const response = await fetch(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}`, {
+      const response = await apiFetch(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}`, {
         method: "PATCH",
-        headers: {
-          Authorization: "Bearer " + state.token,
-          "content-type": "application/json"
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(payload)
       });
       const body = await response.json().catch(() => ({}));
@@ -2715,14 +3132,68 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
         setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to save device", "error");
         return;
       }
-      setStatus(ids("toolbarStatus"), `Saved ${deviceId}`, "ok");
-      await refreshDevices();
+      setStatus(ids("toolbarStatus"), `Saved device ${deviceId}`, "ok");
+      await refreshDevices(false);
+    }
+
+    async function saveUser(userId) {
+      const role = document.querySelector(`[data-user-role="${CSS.escape(userId)}"]`)?.value || "operator";
+      const response = await apiFetch(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to save user", "error");
+        return;
+      }
+      setStatus(ids("toolbarStatus"), `Updated user ${userId}`, "ok");
+      await refreshUsers(false);
+      await refreshAudit(false);
+    }
+
+    async function toggleUserBlock(userId, blocked) {
+      const response = await apiFetch(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ blocked })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to update user status", "error");
+        return;
+      }
+      setStatus(ids("toolbarStatus"), `Updated user state for ${userId}`, "ok");
+      await refreshUsers(false);
+      await refreshAudit(false);
+    }
+
+    async function createToken() {
+      const comment = ids("tokenComment").value.trim();
+      const days = Number(ids("tokenExpiresDays").value || "7");
+      const singleUse = ids("tokenSingleUse").checked;
+      if (!comment) {
+        throw new Error("Comment is required for the enrollment token");
+      }
+      const expiresAtMs = Date.now() + days * 24 * 60 * 60 * 1000;
+      const response = await apiFetch("/api/v1/admin/enrollment-tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ comment, expiresAtMs, singleUse })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body?.error?.message || "Failed to create enrollment token");
+      }
+      ids("tokenComment").value = "";
+      setStatus(ids("toolbarStatus"), `Created token ${body?.enrollmentToken?.tokenId || ""}`, "ok");
+      await refreshTokens(false);
+      await refreshAudit(false);
     }
 
     async function exportCsv() {
-      const response = await fetch("/api/v1/admin/devices/export.csv", {
-        headers: { Authorization: "Bearer " + state.token }
-      });
+      const response = await apiFetch("/api/v1/admin/devices/export.csv");
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || "Failed to export CSV");
@@ -2738,6 +3209,13 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       URL.revokeObjectURL(url);
     }
 
+    function formatDate(value) {
+      if (!value) return "Never";
+      const date = new Date(Number(value));
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString();
+    }
+
     function escapeHtml(value) {
       return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
     }
@@ -2750,18 +3228,29 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       try { await login(); } catch (error) { setStatus(ids("loginStatus"), error.message || String(error), "error"); }
     });
     ids("refreshBtn").addEventListener("click", async () => {
-      try { await refreshDevices(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
+      try { await refreshAll(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
     });
     ids("exportBtn").addEventListener("click", async () => {
       try { await exportCsv(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
     });
+    ids("logoutBtn").addEventListener("click", () => logout(false));
+    ids("createTokenBtn").addEventListener("click", async () => {
+      try { await createToken(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
+    });
+    ids("auditLimit").addEventListener("change", async () => {
+      try { await refreshAudit(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
+    });
     ["search", "groupFilter", "departmentFilter", "locationFilter", "onlineFilter"].forEach((id) => {
-      ids(id).addEventListener("input", renderTable);
-      ids(id).addEventListener("change", renderTable);
+      ids(id).addEventListener("input", renderDevices);
+      ids(id).addEventListener("change", renderDevices);
+    });
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => setView(button.dataset.view));
     });
 
     (async function boot() {
       const token = localStorage.getItem("bk_admin_token");
+      setView("computers");
       if (!token) return;
       state.token = token;
       ids("loginPanel").classList.add("hidden");
@@ -2769,13 +3258,9 @@ const ADMIN_WEB_APP: &str = r#"<!doctype html>
       ids("contentPanel").classList.remove("hidden");
       setStatus(ids("authState"), "Admin session restored", "ok");
       try {
-        await refreshDevices();
+        await refreshAll();
       } catch (error) {
-        localStorage.removeItem("bk_admin_token");
-        state.token = "";
-        ids("loginPanel").classList.remove("hidden");
-        ids("toolbarPanel").classList.add("hidden");
-        ids("contentPanel").classList.add("hidden");
+        logout(true);
         setStatus(ids("loginStatus"), error.message || String(error), "error");
       }
     })();
@@ -2796,6 +3281,21 @@ impl From<UserRecord> for UserSummary {
                 version: value.desktop_version,
                 commit: value.desktop_commit,
             },
+        }
+    }
+}
+
+impl From<EnrollmentTokenRecord> for EnrollmentTokenDetailsSummary {
+    fn from(value: EnrollmentTokenRecord) -> Self {
+        Self {
+            token_id: value.token_id,
+            token: value.token,
+            comment: value.comment,
+            expires_at_ms: value.expires_at_ms as u64,
+            single_use: value.single_use,
+            created_by_user_id: value.created_by_user_id,
+            created_at_ms: value.created_at_ms as u64,
+            used_at_ms: value.used_at_ms.map(|value| value as u64),
         }
     }
 }

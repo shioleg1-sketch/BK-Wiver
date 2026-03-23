@@ -1,32 +1,35 @@
-BK-Wiver Ubuntu update package
+BK-Wiver Ubuntu 24.04 update package
 
-What to copy into the Ubuntu repo root:
-- Cargo.toml
-- Cargo.lock
-- docker-compose.yml
-- Server/app/Cargo.toml
-- Server/app/Dockerfile
-- Server/app/src/main.rs
-- Server/app/src/server.rs
-- Server/deploy/docker-compose.lan.yml
-- Update/update-server-ubuntu.sh
+This folder is now the update source of truth for the server.
+
+What to copy to Ubuntu:
+- the whole `Server/update` directory
 
 Suggested deploy flow on Ubuntu 24.04:
-1. Copy these files over the existing repo at /opt/bk-wiver
-2. cd /opt/bk-wiver
-3. chmod +x Update/update-server-ubuntu.sh
-4. chmod +x Update/verify-server-ubuntu.sh
-5. bash Update/update-server-ubuntu.sh /opt/bk-wiver
-6. bash Update/verify-server-ubuntu.sh http://127.0.0.1:8080
+1. Copy `Server/update` into the repo at `/opt/bk-wiver/Server/update`
+2. `cd /opt/bk-wiver`
+3. `chmod +x Server/update/update-server-ubuntu.sh`
+4. `chmod +x Server/update/verify-server-ubuntu.sh`
+5. `bash Server/update/update-server-ubuntu.sh /opt/bk-wiver`
+6. `bash Server/update/verify-server-ubuntu.sh http://127.0.0.1:8080`
 
-What the script checks:
-- required files are present
-- docker compose rebuilds and restarts the server
-- /healthz works locally and publicly
-- /ws/v1/media no longer returns HTTP 404 locally and publicly
+What `update-server-ubuntu.sh` does:
+- verifies Docker, curl and `.env`
+- takes packaged files from `Server/update`
+- syncs them into live repo paths such as `Cargo.toml`, `docker-compose.yml`, `Server/app/...`, `Server/deploy/...`
+- rebuilds and restarts containers with Docker Compose
+- checks `/healthz`, `/admin` and `/ws/v1/media` locally and through `SERVER_PUBLIC_URL`
 
-What verify-server-ubuntu.sh checks:
-- /healthz returns 200
-- core REST routes exist and return expected auth/validation codes instead of 404
-- /ws/v1/signal exists
-- /ws/v1/media exists
+What `verify-server-ubuntu.sh` checks:
+- `/healthz` returns `200`
+- `/admin` returns `200`
+- core REST routes exist and return expected auth or validation statuses instead of `404`
+- admin routes for devices, users, audit and enrollment tokens exist
+- `/ws/v1/signal` exists
+- `/ws/v1/media` exists
+
+What is included in this package:
+- root Cargo workspace files
+- server Docker and Rust sources
+- Ubuntu LAN Docker Compose override
+- the update and verify scripts
