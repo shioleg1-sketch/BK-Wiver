@@ -15,6 +15,7 @@ pub struct DesktopLoginResponse {
     pub access_token: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HostInfo {
@@ -23,6 +24,16 @@ pub struct HostInfo {
     pub os_version: String,
     pub arch: String,
     pub username: String,
+    #[serde(default)]
+    pub motherboard: String,
+    #[serde(default)]
+    pub cpu: String,
+    #[serde(default)]
+    pub ram_total_mb: u64,
+    #[serde(default)]
+    pub ip_addresses: Vec<String>,
+    #[serde(default)]
+    pub mac_addresses: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -42,6 +53,12 @@ pub struct DeviceSummary {
     pub connect_code: String,
     pub connect_code_expires_at_ms: u64,
     pub host_info: HostInfo,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub department: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
     pub online: bool,
     pub last_seen_ms: u64,
     pub permissions: PermissionStatus,

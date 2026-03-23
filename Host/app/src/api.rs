@@ -32,6 +32,11 @@ pub struct HostInfoPayload {
     pub os_version: String,
     pub arch: String,
     pub username: String,
+    pub motherboard: String,
+    pub cpu: String,
+    pub ram_total_mb: u64,
+    pub ip_addresses: Vec<String>,
+    pub mac_addresses: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]

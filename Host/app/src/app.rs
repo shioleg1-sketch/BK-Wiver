@@ -252,6 +252,15 @@ fn current_session_details() -> String {
     }
 }
 
+#[derive(Default)]
+struct HostInventoryInfo {
+    motherboard: String,
+    cpu: String,
+    ram_total_mb: u64,
+    ip_addresses: Vec<String>,
+    mac_addresses: Vec<String>,
+}
+
 struct HostApp {
     language: AppLanguage,
     client: Client,
@@ -360,12 +369,18 @@ impl HostApp {
     }
 
     fn host_info_payload(&self) -> HostInfoPayload {
+        let inventory = collect_host_inventory();
         HostInfoPayload {
             hostname: env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown-host".to_owned()),
             os: env::consts::OS.to_owned(),
             os_version: env::var("OS").unwrap_or_else(|_| "unknown".to_owned()),
             arch: env::consts::ARCH.to_owned(),
             username: env::var("USERNAME").unwrap_or_else(|_| "unknown".to_owned()),
+            motherboard: inventory.motherboard,
+            cpu: inventory.cpu,
+            ram_total_mb: inventory.ram_total_mb,
+            ip_addresses: inventory.ip_addresses,
+            mac_addresses: inventory.mac_addresses,
         }
     }
 
@@ -1180,6 +1195,69 @@ fn value_or_placeholder<'a>(value: &'a str, placeholder: &'a str) -> &'a str {
     } else {
         value
     }
+}
+
+#[cfg(windows)]
+fn collect_host_inventory() -> HostInventoryInfo {
+    let motherboard = powershell_first_line(
+        "(Get-CimInstance Win32_BaseBoard | Select-Object -First 1 -ExpandProperty Product)",
+    );
+    let cpu = powershell_first_line(
+        "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)",
+    );
+    let ram_total_mb = powershell_first_line(
+        "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)",
+    )
+    .parse::<u64>()
+    .unwrap_or(0);
+    let ip_addresses = powershell_lines(
+        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and -not $_.IPAddress.StartsWith('169.254.') } | Select-Object -ExpandProperty IPAddress -Unique",
+    );
+    let mac_addresses = powershell_lines(
+        "Get-NetAdapter | Where-Object { $_.MacAddress -and $_.Status -ne 'Disabled' } | Select-Object -ExpandProperty MacAddress -Unique",
+    );
+
+    HostInventoryInfo {
+        motherboard,
+        cpu,
+        ram_total_mb,
+        ip_addresses,
+        mac_addresses,
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_host_inventory() -> HostInventoryInfo {
+    HostInventoryInfo::default()
+}
+
+#[cfg(windows)]
+fn powershell_first_line(script: &str) -> String {
+    powershell_lines(script).into_iter().next().unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn powershell_lines(script: &str) -> Vec<String> {
+    let output = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(script)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn load_json<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {

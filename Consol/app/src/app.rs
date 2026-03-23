@@ -2079,17 +2079,42 @@ impl From<DeviceSummary> for HostRecord {
             "{} {} ({})",
             value.host_info.os, value.host_info.os_version, value.host_info.arch
         );
-        let group = if value.online {
-            "В сети".to_owned()
-        } else {
-            "Не в сети".to_owned()
-        };
+        let group = value.group_name.unwrap_or_else(|| {
+            if value.online {
+                "В сети".to_owned()
+            } else {
+                "Не в сети".to_owned()
+            }
+        });
         let note = format!(
-            "{}. Код подключения обновляется автоматически; текущий слот истекает {}.",
+            "{}. {}{}{}Код подключения обновляется автоматически; текущий слот истекает {}.",
             if value.permissions.input_control {
                 "Устройство готово к удалённому управлению"
             } else {
                 "Устройство с ограниченным управлением"
+            },
+            value.department
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("Отдел: {value}. "))
+                .unwrap_or_default(),
+            value.location
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("Локация: {value}. "))
+                .unwrap_or_default(),
+            if value.host_info.ram_total_mb > 0 || !value.host_info.cpu.is_empty() {
+                format!(
+                    "CPU: {}. RAM: {} MB. ",
+                    if value.host_info.cpu.is_empty() {
+                        "unknown"
+                    } else {
+                        value.host_info.cpu.as_str()
+                    },
+                    value.host_info.ram_total_mb
+                )
+            } else {
+                String::new()
             },
             format_ms(value.connect_code_expires_at_ms)
         );
