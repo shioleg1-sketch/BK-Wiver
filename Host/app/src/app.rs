@@ -651,7 +651,8 @@ impl HostApp {
                     kind,
                     key,
                     text,
-                } => match self.apply_key_input(&kind, &key, &text) {
+                    modifiers,
+                } => match self.apply_key_input(&kind, &key, &text, &modifiers) {
                     Ok(()) => {
                         self.status_line =
                             format!("Выполнена клавиатурная команда для сеанса {session_id}.");
@@ -740,7 +741,13 @@ impl HostApp {
             .map_err(|error| error.to_string())
     }
 
-    fn apply_key_input(&self, kind: &str, key: &str, text: &str) -> Result<(), String> {
+    fn apply_key_input(
+        &self,
+        kind: &str,
+        key: &str,
+        text: &str,
+        modifiers: &[String],
+    ) -> Result<(), String> {
         let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
         match kind {
             "text" => {
@@ -749,26 +756,17 @@ impl HostApp {
                 }
             }
             _ => {
-                let key = match key {
-                    "enter" => Key::Return,
-                    "tab" => Key::Tab,
-                    "backspace" => Key::Backspace,
-                    "escape" => Key::Escape,
-                    "space" => Key::Space,
-                    "arrow_up" => Key::UpArrow,
-                    "arrow_down" => Key::DownArrow,
-                    "arrow_left" => Key::LeftArrow,
-                    "arrow_right" => Key::RightArrow,
-                    "delete" => Key::Delete,
-                    "home" => Key::Home,
-                    "end" => Key::End,
-                    "page_up" => Key::PageUp,
-                    "page_down" => Key::PageDown,
-                    _ => return Ok(()),
+                let Some(key) = remote_named_key(key) else {
+                    return Ok(());
                 };
-                enigo
-                    .key(key, Direction::Click)
-                    .map_err(|error| error.to_string())?;
+
+                let modifier_keys = modifier_keys(modifiers);
+                press_modifier_keys(&mut enigo, &modifier_keys)?;
+                let key_result = enigo.key(key, Direction::Click);
+                let release_result = release_modifier_keys(&mut enigo, &modifier_keys);
+
+                key_result.map_err(|error| error.to_string())?;
+                release_result?;
             }
         }
 
@@ -1230,6 +1228,121 @@ fn select_primary_screen() -> Option<Screen> {
         .find(|screen| screen.display_info.is_primary)
         .copied()
         .or_else(|| screens.into_iter().next())
+}
+
+fn modifier_keys(modifiers: &[String]) -> Vec<Key> {
+    let mut keys = Vec::new();
+
+    for modifier in modifiers {
+        let key = match modifier.as_str() {
+            "ctrl" => Key::Control,
+            "alt" => Key::Alt,
+            "shift" => Key::Shift,
+            "meta" => Key::Meta,
+            _ => continue,
+        };
+
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    keys
+}
+
+fn press_modifier_keys(enigo: &mut Enigo, modifiers: &[Key]) -> Result<(), String> {
+    for key in modifiers {
+        enigo
+            .key(*key, Direction::Press)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn release_modifier_keys(enigo: &mut Enigo, modifiers: &[Key]) -> Result<(), String> {
+    for key in modifiers.iter().rev() {
+        enigo
+            .key(*key, Direction::Release)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remote_named_key(key: &str) -> Option<Key> {
+    match key {
+        "enter" => Some(Key::Return),
+        "tab" => Some(Key::Tab),
+        "backspace" => Some(Key::Backspace),
+        "escape" => Some(Key::Escape),
+        "space" => Some(Key::Space),
+        "insert" => Some(Key::Insert),
+        "arrow_up" => Some(Key::UpArrow),
+        "arrow_down" => Some(Key::DownArrow),
+        "arrow_left" => Some(Key::LeftArrow),
+        "arrow_right" => Some(Key::RightArrow),
+        "delete" => Some(Key::Delete),
+        "home" => Some(Key::Home),
+        "end" => Some(Key::End),
+        "page_up" => Some(Key::PageUp),
+        "page_down" => Some(Key::PageDown),
+        "a" => Some(Key::A),
+        "b" => Some(Key::B),
+        "c" => Some(Key::C),
+        "d" => Some(Key::D),
+        "e" => Some(Key::E),
+        "f" => Some(Key::F),
+        "g" => Some(Key::G),
+        "h" => Some(Key::H),
+        "i" => Some(Key::I),
+        "j" => Some(Key::J),
+        "k" => Some(Key::K),
+        "l" => Some(Key::L),
+        "m" => Some(Key::M),
+        "n" => Some(Key::N),
+        "o" => Some(Key::O),
+        "p" => Some(Key::P),
+        "q" => Some(Key::Q),
+        "r" => Some(Key::R),
+        "s" => Some(Key::S),
+        "t" => Some(Key::T),
+        "u" => Some(Key::U),
+        "v" => Some(Key::V),
+        "w" => Some(Key::W),
+        "x" => Some(Key::X),
+        "y" => Some(Key::Y),
+        "z" => Some(Key::Z),
+        "0" => Some(Key::Num0),
+        "1" => Some(Key::Num1),
+        "2" => Some(Key::Num2),
+        "3" => Some(Key::Num3),
+        "4" => Some(Key::Num4),
+        "5" => Some(Key::Num5),
+        "6" => Some(Key::Num6),
+        "7" => Some(Key::Num7),
+        "8" => Some(Key::Num8),
+        "9" => Some(Key::Num9),
+        "f1" => Some(Key::F1),
+        "f2" => Some(Key::F2),
+        "f3" => Some(Key::F3),
+        "f4" => Some(Key::F4),
+        "f5" => Some(Key::F5),
+        "f6" => Some(Key::F6),
+        "f7" => Some(Key::F7),
+        "f8" => Some(Key::F8),
+        "f9" => Some(Key::F9),
+        "f10" => Some(Key::F10),
+        "f11" => Some(Key::F11),
+        "f12" => Some(Key::F12),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn remote_named_key(_key: &str) -> Option<Key> {
+    None
 }
 
 fn publish_service_status(state: &str, message: &str) -> Result<(), String> {

@@ -35,6 +35,7 @@ impl ScreenshotsCaptureBackend {
         }
     }
 
+    #[cfg(windows)]
     pub fn backend_name(&self) -> &'static str {
         self.backend_name
     }

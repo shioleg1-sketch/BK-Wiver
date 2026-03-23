@@ -121,6 +121,7 @@ pub fn send_key_named(
     token: &str,
     session_id: &str,
     key: &str,
+    modifiers: &[&str],
 ) -> Result<(), String> {
     send_message(
         server_url,
@@ -130,6 +131,7 @@ pub fn send_key_named(
             "sessionId": session_id,
             "kind": "named",
             "key": key,
+            "modifiers": modifiers,
         }),
     )
 }

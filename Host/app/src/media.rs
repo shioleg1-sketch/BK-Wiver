@@ -100,12 +100,8 @@ impl StreamProfile {
         }
     }
 
-    fn active_frame_delay(self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_millis(28),
-            Self::Balanced => Duration::from_millis(34),
-            Self::Sharp => Duration::from_millis(33),
-        }
+    fn target_frame_interval(self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.target_fps() as f64)
     }
 
     fn target_fps(self) -> u32 {
@@ -126,9 +122,9 @@ impl StreamProfile {
 
     fn target_bitrate(self) -> &'static str {
         match self {
-            Self::Fast => "1800k",
-            Self::Balanced => "3200k",
-            Self::Sharp => "7000k",
+            Self::Fast => "2600k",
+            Self::Balanced => "5200k",
+            Self::Sharp => "9000k",
         }
     }
 
@@ -143,8 +139,8 @@ impl StreamProfile {
     fn target_cpu_used(self) -> &'static str {
         match self {
             Self::Fast => "9",
-            Self::Balanced => "8",
-            Self::Sharp => "8",
+            Self::Balanced => "7",
+            Self::Sharp => "6",
         }
     }
 }
@@ -718,7 +714,12 @@ pub fn spawn_stream(
                             }
                         };
 
-                        thread::sleep(stream_profile.active_frame_delay());
+                        let frame_elapsed = capture_started_at.elapsed();
+                        if let Some(remaining) =
+                            stream_profile.target_frame_interval().checked_sub(frame_elapsed)
+                        {
+                            thread::sleep(remaining);
+                        }
                     }
 
                     let _ = socket.close(None);
@@ -729,21 +730,6 @@ pub fn spawn_stream(
             }
         }
     });
-}
-
-fn frame_signature(bytes: &[u8]) -> Vec<u8> {
-    let desired = 96usize;
-    let step = (bytes.len() / desired.max(1)).max(1);
-    bytes.iter().step_by(step).take(desired).copied().collect()
-}
-
-fn signature_distance(previous: &[u8], next: &[u8]) -> u32 {
-    previous
-        .iter()
-        .zip(next.iter())
-        .map(|(left, right)| left.abs_diff(*right) as u32)
-        .sum::<u32>()
-        / previous.len().max(1) as u32
 }
 
 fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, String> {
@@ -802,11 +788,13 @@ fn ensure_h264_encoder(
     }
 }
 
+#[cfg(windows)]
 fn configure_hidden_process(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_hidden_process(_command: &mut Command) {
 }
 
 fn ensure_vp8_encoder(

@@ -30,6 +30,7 @@ pub enum SignalEvent {
         kind: String,
         key: String,
         text: String,
+        modifiers: Vec<String>,
     },
     MediaFeedback {
         session_id: String,
@@ -163,6 +164,17 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            modifiers: payload
+                .get("modifiers")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }),
         "session.media_feedback" => Some(SignalEvent::MediaFeedback {
             session_id: payload.get("sessionId")?.as_str()?.to_owned(),
