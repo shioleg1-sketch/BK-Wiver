@@ -312,6 +312,7 @@ struct UpdateUserRequest {
 struct DeviceRecord {
     device_id: String,
     device_name: String,
+    #[allow(dead_code)]
     owner_user_id: Option<String>,
     hostname: String,
     os: String,
