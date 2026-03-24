@@ -38,6 +38,7 @@ const HOST_AGENT_TASK_NAME: &str = "BK-Host Agent";
 const HOST_STATE_REFRESH_MS: u64 = 2_000;
 const HOST_RUNTIME_PUBLISH_MS: u64 = 5_000;
 const HOST_AUTO_CONNECT_RETRY_MS: u64 = 10_000;
+const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
 const DEFAULT_OPERATOR_LOGIN: &str = "operator";
 const DEFAULT_OPERATOR_PASSWORD: &str = "bk-wiver-auto";
 
@@ -294,7 +295,7 @@ impl HostApp {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            server_url_input: "http://172.16.100.164:8080".to_owned(),
+            server_url_input: DEFAULT_SERVER_URL.to_owned(),
             login_input: DEFAULT_OPERATOR_LOGIN.to_owned(),
             password_input: DEFAULT_OPERATOR_PASSWORD.to_owned(),
             enrollment_token_input: String::new(),
@@ -335,8 +336,10 @@ impl HostApp {
             load_json::<DeviceRegistration>("device-registration.json").unwrap_or_default();
         self.service_status = load_json::<ServiceRuntimeStatus>("service-status.json");
         self.agent_status = load_json::<AgentRuntimeStatus>("agent-status.json");
-        if !self.registration.server_url.trim().is_empty() {
-            self.server_url_input = self.registration.server_url.clone();
+        let registration_server_url = normalize_server_url(&self.registration.server_url);
+        if !registration_server_url.is_empty() && !is_loopback_server_url(&registration_server_url)
+        {
+            self.server_url_input = registration_server_url;
         }
         self.last_refresh_at_ms = now_ms();
         self.status_line = if self.registration.device_id.is_empty() {
@@ -355,10 +358,7 @@ impl HostApp {
     }
 
     fn normalized_server_url(&self) -> String {
-        self.server_url_input
-            .trim()
-            .trim_end_matches('/')
-            .to_owned()
+        normalize_server_url(&self.server_url_input)
     }
 
     fn desktop_version(&self) -> DesktopVersion {
@@ -428,7 +428,7 @@ impl HostApp {
             .map_err(|error| format!("Не удалось сохранить регистрацию: {error}"))?;
 
         self.registration = registration;
-        self.server_url_input = self.registration.server_url.clone();
+        self.server_url_input = normalize_server_url(&self.registration.server_url);
         self.last_heartbeat_attempt_at_ms = 0;
         self.signal_listener_key = None;
         logging::append_log(
@@ -918,6 +918,37 @@ impl HostApp {
             }
         }
     }
+}
+
+fn normalize_server_url(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ws://")
+        || trimmed.starts_with("wss://")
+    {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    }
+}
+
+fn is_loopback_server_url(value: &str) -> bool {
+    let normalized = normalize_server_url(value).to_ascii_lowercase();
+    normalized.starts_with("http://127.0.0.1")
+        || normalized.starts_with("https://127.0.0.1")
+        || normalized.starts_with("ws://127.0.0.1")
+        || normalized.starts_with("wss://127.0.0.1")
+        || normalized.starts_with("http://localhost")
+        || normalized.starts_with("https://localhost")
+        || normalized.starts_with("ws://localhost")
+        || normalized.starts_with("wss://localhost")
+        || normalized == "127.0.0.1"
+        || normalized == "localhost"
 }
 
 impl App for HostApp {

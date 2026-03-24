@@ -403,6 +403,8 @@ struct ConsoleApp {
     signal_rx: Receiver<SignalEvent>,
 }
 
+const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
+
 impl ConsoleApp {
     fn new(cc: &CreationContext<'_>) -> Self {
         apply_console_theme(&cc.egui_ctx);
@@ -418,7 +420,7 @@ impl ConsoleApp {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            server_url: "http://172.16.100.164:8080".to_owned(),
+            server_url: DEFAULT_SERVER_URL.to_owned(),
             login: DEFAULT_OPERATOR_LOGIN.to_owned(),
             password: DEFAULT_OPERATOR_PASSWORD.to_owned(),
             search_query: String::new(),
@@ -2393,7 +2395,20 @@ fn map_egui_modifiers(modifiers: egui::Modifiers) -> Vec<&'static str> {
 }
 
 fn normalize_server_url(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_owned()
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("ws://")
+        || trimmed.starts_with("wss://")
+    {
+        trimmed.to_owned()
+    } else {
+        format!("http://{trimmed}")
+    }
 }
 
 fn now_ms() -> u64 {
