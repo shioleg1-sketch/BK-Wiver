@@ -1,8 +1,14 @@
-use std::{thread, time::Duration};
+use std::{
+    collections::HashMap,
+    io::ErrorKind,
+    sync::{Mutex, OnceLock},
+    thread,
+    time::Duration,
+};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, unbounded};
 use serde_json::{Value, json};
-use tungstenite::{Message, connect};
+use tungstenite::{Message, connect, stream::MaybeTlsStream};
 use url::Url;
 
 #[derive(Clone)]
@@ -39,7 +45,19 @@ pub enum SignalEvent {
     },
 }
 
+static SIGNAL_OUTBOUND: OnceLock<Mutex<HashMap<String, Sender<Value>>>> = OnceLock::new();
+
+fn outbound_registry() -> &'static Mutex<HashMap<String, Sender<Value>>> {
+    SIGNAL_OUTBOUND.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<SignalEvent>) {
+    let connection_key = signal_connection_key(&server_url, &token);
+    let (outbound_tx, outbound_rx) = unbounded::<Value>();
+    if let Ok(mut registry) = outbound_registry().lock() {
+        registry.insert(connection_key.clone(), outbound_tx);
+    }
+
     thread::spawn(move || {
         let mut was_connected = false;
         let Ok(url) = signal_url(&server_url, &token) else {
@@ -50,10 +68,28 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
         loop {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
+                    if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    }
                     was_connected = true;
                     let _ = event_tx.send(SignalEvent::Connected);
 
                     loop {
+                        loop {
+                            match outbound_rx.try_recv() {
+                                Ok(payload) => {
+                                    if socket
+                                        .send(Message::Text(payload.to_string().into()))
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                                Err(crossbeam_channel::TryRecvError::Disconnected) => return,
+                            }
+                        }
+
                         match socket.read() {
                             Ok(Message::Text(text)) => {
                                 if let Some(event) = parse_signal_event(text.as_str()) {
@@ -65,6 +101,11 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                             }
                             Ok(Message::Close(_)) => break,
                             Ok(_) => {}
+                            Err(tungstenite::Error::Io(error))
+                                if matches!(
+                                    error.kind(),
+                                    ErrorKind::WouldBlock | ErrorKind::TimedOut
+                                ) => {}
                             Err(_) => break,
                         }
                     }
@@ -101,6 +142,12 @@ pub fn send_session_accepted(
 }
 
 pub fn send_message(server_url: &str, token: &str, payload: Value) -> Result<(), String> {
+    if let Ok(registry) = outbound_registry().lock()
+        && let Some(tx) = registry.get(&signal_connection_key(server_url, token))
+    {
+        return tx.send(payload).map_err(|error| error.to_string());
+    }
+
     let url = signal_url(server_url, token)?;
     let (mut socket, _) = connect(url.as_str()).map_err(|error| error.to_string())?;
     socket
@@ -202,4 +249,8 @@ fn signal_url(server_url: &str, token: &str) -> Result<Url, String> {
     };
 
     Url::parse(&format!("{ws_base}/ws/v1/signal?token={token}")).map_err(|error| error.to_string())
+}
+
+fn signal_connection_key(server_url: &str, token: &str) -> String {
+    format!("{}|{}", server_url.trim().trim_end_matches('/'), token.trim())
 }
