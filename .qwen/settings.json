@@ -28,7 +28,19 @@
       "Bash(git *)",
       "Bash(git ls-remote *)",
       "Bash(sed *)",
-      "Bash(cargo check *)"
+      "Bash(cargo check *)",
+      "Bash(chmod *)",
+      "Bash(./deploy-to-wiver.sh)",
+      "Bash(apt-get *)",
+      "Bash(dpkg *)",
+      "Bash(ln *)",
+      "Bash(nginx *)",
+      "Bash(ss *)",
+      "Bash(systemctl *)",
+      "Bash(sleep *)",
+      "Bash(docker volume *)",
+      "Bash(docker system *)",
+      "Bash(docker exec *)"
     ]
   },
   "$version": 3

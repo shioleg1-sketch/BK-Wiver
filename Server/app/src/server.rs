@@ -988,15 +988,15 @@ async fn register_device(
     record_inventory_change(
         &state.db,
         &device_id,
-        null_if_empty(&request.host_info.motherboard),
-        null_if_empty(&request.host_info.cpu),
+        null_if_empty(&request.host_info.motherboard).as_deref(),
+        null_if_empty(&request.host_info.cpu).as_deref(),
         if request.host_info.ram_total_mb == 0 {
             None
         } else {
             Some(request.host_info.ram_total_mb as i64)
         },
-        serialize_string_list(&request.host_info.ip_addresses),
-        serialize_string_list(&request.host_info.mac_addresses),
+        serialize_string_list(&request.host_info.ip_addresses).as_deref(),
+        serialize_string_list(&request.host_info.mac_addresses).as_deref(),
         &request.host_info.os,
         &request.host_info.os_version,
         &request.host_info.arch,
@@ -2799,10 +2799,24 @@ async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
 
     sqlx::query(
         r#"
-        INSERT INTO admins (admin_id, login, blocked, last_login_at_ms)
+        CREATE TABLE IF NOT EXISTS admin_access_tokens (
+            token TEXT PRIMARY KEY,
+            admin_id TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            created_at_ms BIGINT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO admins (admin_id, login, role, blocked, last_login_at_ms)
         SELECT
             admin_id,
             admin_id,
+            'admin',
             FALSE,
             MAX(created_at_ms) AS last_login_at_ms
         FROM admin_access_tokens
@@ -2813,19 +2827,6 @@ async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
         )
         GROUP BY admin_id
         ON CONFLICT (admin_id) DO NOTHING;
-        "#,
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS admin_access_tokens (
-            token TEXT PRIMARY KEY,
-            admin_id TEXT NOT NULL,
-            refresh_token TEXT NOT NULL,
-            created_at_ms BIGINT NOT NULL
-        );
         "#,
     )
     .execute(db)
