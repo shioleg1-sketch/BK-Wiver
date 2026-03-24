@@ -513,7 +513,7 @@ impl HostApp {
             now_ms(),
         )?;
         self.last_heartbeat_attempt_at_ms = now_ms();
-        logging::append_log("DEBUG", "host.heartbeat", "heartbeat sent");
+        logging::append_log("DEBUG", "host.heartbeat", format!("heartbeat sent device_id={}", self.registration.device_id));
         Ok(())
     }
 

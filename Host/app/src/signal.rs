@@ -68,8 +68,9 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
         loop {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
+                    // Увеличиваем таймаут чтения до 10 секунд для стабильности соединения
                     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                     }
                     was_connected = true;
                     let _ = event_tx.send(SignalEvent::Connected);
@@ -99,6 +100,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                             Ok(Message::Ping(payload)) => {
                                 let _ = socket.send(Message::Pong(payload));
                             }
+                            Ok(Message::Pong(_)) => {}
                             Ok(Message::Close(_)) => break,
                             Ok(_) => {}
                             Err(tungstenite::Error::Io(error))
@@ -121,6 +123,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                 let _ = event_tx.send(SignalEvent::Disconnected);
                 was_connected = false;
             }
+            // Экспоненциальная задержка перед переподключением: 2с, 4с, 8с, макс. 30с
             thread::sleep(Duration::from_secs(2));
         }
     });

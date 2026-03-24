@@ -22,7 +22,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 const DEVICE_HEARTBEAT_INTERVAL_SEC: u32 = 15;
-const DEVICE_OFFLINE_AFTER_MS: i64 = (DEVICE_HEARTBEAT_INTERVAL_SEC as i64) * 3_000;
+// Устройство считается offline, если heartbeat не было в течение 2 минут (вместо 45 секунд)
+const DEVICE_OFFLINE_AFTER_MS: i64 = 120_000;
 const SESSION_TTL_MS: u64 = 5 * 60 * 1000;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -586,6 +587,8 @@ async fn login(
         ));
     }
 
+    eprintln!("[DESKTOP_LOGIN] Attempting login for user={} version={}", login, request.desktop_version.version);
+
     let user = sqlx::query(
         r#"
         SELECT user_id, blocked
@@ -600,6 +603,7 @@ async fn login(
 
     let user_id = if let Some(row) = user {
         if row.get::<bool, _>("blocked") {
+            eprintln!("[DESKTOP_LOGIN] User is blocked: user_id={}", row.get::<String, _>("user_id"));
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "DEVICE_PERMISSION_DENIED",
@@ -607,6 +611,7 @@ async fn login(
             ));
         }
         let user_id = row.get::<String, _>("user_id");
+        eprintln!("[DESKTOP_LOGIN] Existing user found: user_id={}", user_id);
         sqlx::query(
             r#"
             UPDATE users
@@ -629,6 +634,7 @@ async fn login(
         user_id
     } else {
         let user_id = format!("usr_{}", short_id());
+        eprintln!("[DESKTOP_LOGIN] Creating new user: user_id={} login={} role=operator", user_id, login);
         sqlx::query(
             r#"
             INSERT INTO users (
@@ -682,6 +688,9 @@ async fn login(
 
     record_audit_event(&state.db, "user", &user_id, "auth.login", "user", &user_id).await?;
 
+    eprintln!("[DESKTOP_LOGIN] Success: user_id={} login={} token_prefix={}", 
+        user_id, login, &access_token[..20.min(access_token.len())]);
+
     Ok(Json(DesktopLoginResponse {
         user_id,
         access_token,
@@ -702,6 +711,8 @@ async fn admin_login(
         ));
     }
 
+    eprintln!("[ADMIN_LOGIN] Attempting login for admin={}", login);
+
     let admin = sqlx::query(
         r#"
         SELECT admin_id, login, role, blocked
@@ -716,6 +727,7 @@ async fn admin_login(
 
     let admin_id = if let Some(row) = admin {
         if row.get::<bool, _>("blocked") {
+            eprintln!("[ADMIN_LOGIN] Admin is blocked: admin_id={}", row.get::<String, _>("admin_id"));
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "DEVICE_PERMISSION_DENIED",
@@ -725,6 +737,7 @@ async fn admin_login(
         let admin_id = row.get::<String, _>("admin_id");
         let admin_login = row.get::<String, _>("login");
         let admin_role = row.get::<String, _>("role");
+        eprintln!("[ADMIN_LOGIN] Existing admin found: admin_id={} role={}", admin_id, admin_role);
         sqlx::query(
             r#"
             UPDATE admins
@@ -756,6 +769,7 @@ async fn admin_login(
         admin_id
     } else {
         let admin_id = format!("adm_{}", short_id());
+        eprintln!("[ADMIN_LOGIN] Creating new admin: admin_id={} login={} role=admin", admin_id, login);
         sqlx::query(
             r#"
             INSERT INTO admins (
@@ -826,6 +840,9 @@ async fn admin_login(
         (login.to_string(), "admin".to_string())
     };
 
+    eprintln!("[ADMIN_LOGIN] Success: admin_id={} login={} role={} token_prefix={}", 
+        admin_id, admin_login, admin_role, &access_token[..20.min(access_token.len())]);
+
     Ok(Json(AdminLoginResponse {
         admin_id,
         login: admin_login,
@@ -892,6 +909,9 @@ async fn register_device(
     let device_name = request.host_info.hostname.clone();
     let device_token = format!("device_{}", Uuid::new_v4().simple());
     let last_seen_ms = now_ms_i64();
+
+    eprintln!("[REGISTER] Registering new device: device_id={} hostname={} token_prefix={}", 
+        device_id, device_name, &device_token[..20.min(device_token.len())]);
 
     sqlx::query(
         r#"
@@ -1025,6 +1045,7 @@ async fn device_heartbeat(
 ) -> Result<Json<AckResponse>, ApiError> {
     let device_id = authorize_device_token(&state, &headers).await?;
     if device_id != request.device_id {
+        eprintln!("[HEARTBEAT] Device ID mismatch: token_device={device_id} request_device={}", request.device_id);
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "DEVICE_PERMISSION_DENIED",
@@ -1056,6 +1077,7 @@ async fn device_heartbeat(
     .map_err(|error| ApiError::internal(format!("failed to update heartbeat: {error}")))?;
 
     if result.rows_affected() == 0 {
+        eprintln!("[HEARTBEAT] No rows affected for device_id={device_id}");
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "DEVICE_NOT_FOUND",
@@ -1063,6 +1085,7 @@ async fn device_heartbeat(
         ));
     }
 
+    eprintln!("[HEARTBEAT] OK device_id={device_id} last_seen_ms={}", (request.unix_time_ms.max(now_ms())) as i64);
     Ok(Json(AckResponse { ok: true }))
 }
 
@@ -1072,6 +1095,12 @@ async fn list_devices(
 ) -> Result<Json<ListDevicesResponse>, ApiError> {
     let _user_id = authorize_access_token(&state, &headers).await?;
     let records = fetch_visible_devices(&state.db).await?;
+
+    eprintln!("[LIST_DEVICES] Found {} devices for user={}", records.len(), _user_id);
+    for record in &records {
+        eprintln!("[LIST_DEVICES] device_id={} device_name={} online={} last_seen_ms={}", 
+            record.device_id, record.device_name, record.online, record.last_seen_ms);
+    }
 
     let devices = records.into_iter().map(DeviceSummary::from).collect();
 
@@ -1084,6 +1113,13 @@ async fn list_admin_devices(
 ) -> Result<Json<ListDevicesResponse>, ApiError> {
     let _admin_id = authorize_admin_access_token(&state, &headers).await?;
     let records = fetch_visible_devices(&state.db).await?;
+    
+    eprintln!("[LIST_ADMIN_DEVICES] Found {} devices for admin={}", records.len(), _admin_id);
+    for record in &records {
+        eprintln!("[LIST_ADMIN_DEVICES] device_id={} device_name={} online={} last_seen_ms={}", 
+            record.device_id, record.device_name, record.online, record.last_seen_ms);
+    }
+    
     let devices = records.into_iter().map(DeviceSummary::from).collect();
     Ok(Json(ListDevicesResponse { devices }))
 }
@@ -1955,7 +1991,7 @@ async fn process_signal_message(
 
 async fn authorize_access_token(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = bearer_token(headers)?;
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         SELECT access_tokens.user_id
         FROM access_tokens
@@ -1968,7 +2004,15 @@ async fn authorize_access_token(state: &AppState, headers: &HeaderMap) -> Result
     .await
     .map_err(|error| ApiError::internal(format!("failed to authorize access token: {error}")))?
     .map(|row| row.get::<String, _>("user_id"))
-    .ok_or_else(|| ApiError::unauthorized("access token is invalid or expired"))
+    .ok_or_else(|| ApiError::unauthorized("access token is invalid or expired"));
+    
+    match &result {
+        Ok(user_id) => eprintln!("[USER_AUTH] Success: user_id={}", user_id),
+        Err(e) => eprintln!("[USER_AUTH] Failed: {}", e.message),
+        _ => {}
+    }
+    
+    result
 }
 
 async fn authorize_admin_access_token(
@@ -1976,7 +2020,7 @@ async fn authorize_admin_access_token(
     headers: &HeaderMap,
 ) -> Result<String, ApiError> {
     let token = bearer_token(headers)?;
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         SELECT admin_access_tokens.admin_id
         FROM admin_access_tokens
@@ -1989,7 +2033,15 @@ async fn authorize_admin_access_token(
     .await
     .map_err(|error| ApiError::internal(format!("failed to authorize admin token: {error}")))?
     .map(|row| row.get::<String, _>("admin_id"))
-    .ok_or_else(|| ApiError::unauthorized("admin access token is invalid or expired"))
+    .ok_or_else(|| ApiError::unauthorized("admin access token is invalid or expired"));
+    
+    match &result {
+        Ok(admin_id) => eprintln!("[ADMIN_AUTH] Success: admin_id={}", admin_id),
+        Err(e) => eprintln!("[ADMIN_AUTH] Failed: {}", e.message),
+        _ => {}
+    }
+    
+    result
 }
 
 struct ApiActor<'a> {
@@ -2073,6 +2125,7 @@ async fn authorize_api_actor<'a>(
 }
 
 async fn authorize_signal_actor(state: &AppState, token: &str) -> Result<SignalActor, ApiError> {
+    // Проверяем пользовательский токен
     if let Some(row) = sqlx::query(
         r#"
         SELECT access_tokens.user_id
@@ -2086,23 +2139,40 @@ async fn authorize_signal_actor(state: &AppState, token: &str) -> Result<SignalA
     .await
     .map_err(|error| ApiError::internal(format!("failed to authorize signal user: {error}")))?
     {
+        let user_id = row.get::<String, _>("user_id");
+        eprintln!("[SIGNAL AUTH] User authorized: user_id={user_id}");
         return Ok(SignalActor::User {
-            user_id: row.get::<String, _>("user_id"),
+            user_id,
         });
     }
 
-    if let Some(row) =
-        sqlx::query("SELECT device_id FROM devices WHERE device_token = $1 AND blocked = FALSE")
-            .bind(token)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|error| {
-                ApiError::internal(format!("failed to authorize signal device: {error}"))
-            })?
-    {
-        return Ok(SignalActor::Device {
-            device_id: row.get::<String, _>("device_id"),
-        });
+    // Проверяем токен устройства
+    let device_result = sqlx::query(
+        "SELECT device_id, blocked FROM devices WHERE device_token = $1",
+    )
+    .bind(token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        eprintln!("[SIGNAL AUTH] DB error for device token: {error}");
+        ApiError::internal(format!("failed to authorize signal device: {error}"))
+    });
+
+    match device_result {
+        Ok(Some(row)) => {
+            let device_id = row.get::<String, _>("device_id");
+            let blocked = row.get::<bool, _>("blocked");
+            if blocked {
+                eprintln!("[SIGNAL AUTH] Device blocked: device_id={device_id}");
+                return Err(ApiError::unauthorized("device is blocked"));
+            }
+            eprintln!("[SIGNAL AUTH] Device authorized: device_id={device_id}");
+            return Ok(SignalActor::Device { device_id });
+        }
+        Ok(None) => {
+            eprintln!("[SIGNAL AUTH] Device token not found in DB: token_prefix={}", &token[..20.min(token.len())]);
+        }
+        Err(_) => {}
     }
 
     Err(ApiError::unauthorized("signal token is invalid or expired"))
@@ -2251,7 +2321,10 @@ fn stable_code_hash(input: &str) -> u32 {
 }
 
 async fn fetch_visible_devices(db: &PgPool) -> Result<Vec<DeviceRecord>, ApiError> {
-    sqlx::query_as::<_, DeviceRecord>(
+    let cutoff = device_online_cutoff_ms();
+    eprintln!("[FETCH_DEVICES] Online cutoff: {} ms ago ({} sec)", DEVICE_OFFLINE_AFTER_MS, DEVICE_OFFLINE_AFTER_MS / 1000);
+    
+    let records = sqlx::query_as::<_, DeviceRecord>(
         r#"
         SELECT
             device_id,
@@ -2285,10 +2358,16 @@ async fn fetch_visible_devices(db: &PgPool) -> Result<Vec<DeviceRecord>, ApiErro
         ORDER BY last_seen_ms DESC, device_name ASC
         "#,
     )
-    .bind(device_online_cutoff_ms())
+    .bind(cutoff)
     .fetch_all(db)
     .await
-    .map_err(|error| ApiError::internal(format!("failed to list devices: {error}")))
+    .map_err(|error| {
+        eprintln!("[FETCH_DEVICES] DB error: {error}");
+        ApiError::internal(format!("failed to list devices: {error}"))
+    })?;
+    
+    eprintln!("[FETCH_DEVICES] Returned {} unblocked devices", records.len());
+    Ok(records)
 }
 
 async fn find_target_device(db: &PgPool, target: &str) -> Result<DeviceRecord, ApiError> {
