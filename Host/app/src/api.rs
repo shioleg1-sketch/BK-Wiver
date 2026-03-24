@@ -153,7 +153,7 @@ pub fn connect_host(
         .json::<DeviceRegistration>()
         .map_err(|error| format!("Некорректный ответ регистрации: {error}"))?;
 
-    if is_loopback_server_url(&registration.server_url) && !fallback_server_url.is_empty() {
+    if !fallback_server_url.is_empty() {
         registration.server_url = fallback_server_url;
     }
 

@@ -39,6 +39,7 @@ const HOST_STATE_REFRESH_MS: u64 = 2_000;
 const HOST_RUNTIME_PUBLISH_MS: u64 = 5_000;
 const HOST_AUTO_CONNECT_RETRY_MS: u64 = 10_000;
 const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
+const DEFAULT_SERVER_FALLBACK_URL: &str = "http://172.16.100.164";
 const DEFAULT_OPERATOR_LOGIN: &str = "operator";
 const DEFAULT_OPERATOR_PASSWORD: &str = "bk-wiver-auto";
 
@@ -413,16 +414,35 @@ impl HostApp {
                 .to_owned());
         }
 
-        let registration = api::connect_host(
-            &self.client,
-            &server_url,
-            login,
-            password,
-            self.enrollment_token_input.trim(),
-            self.desktop_version(),
-            self.host_info_payload(),
-            self.permissions_payload(),
-        )?;
+        let mut last_error = None;
+        let desktop_version = self.desktop_version();
+        let host_info = self.host_info_payload();
+        let permissions = self.permissions_payload();
+        let mut registration = None;
+
+        for candidate in server_url_candidates(&server_url) {
+            match api::connect_host(
+                &self.client,
+                &candidate,
+                login,
+                password,
+                self.enrollment_token_input.trim(),
+                desktop_version.clone(),
+                host_info.clone(),
+                permissions.clone(),
+            ) {
+                Ok(value) => {
+                    registration = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let registration = registration
+            .ok_or_else(|| last_error.unwrap_or_else(|| "Не удалось подключиться к серверу.".to_owned()))?;
 
         save_json("device-registration.json", &registration)
             .map_err(|error| format!("Не удалось сохранить регистрацию: {error}"))?;
@@ -949,6 +969,27 @@ fn is_loopback_server_url(value: &str) -> bool {
         || normalized.starts_with("wss://localhost")
         || normalized == "127.0.0.1"
         || normalized == "localhost"
+}
+
+fn server_url_candidates(primary: &str) -> Vec<String> {
+    let primary = normalize_server_url(primary);
+    if primary.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = vec![primary.clone()];
+    let fallback = normalize_server_url(DEFAULT_SERVER_FALLBACK_URL);
+
+    if primary == normalize_server_url(DEFAULT_SERVER_URL) && primary != fallback {
+        candidates.push(fallback);
+    } else if primary == fallback {
+        let domain = normalize_server_url(DEFAULT_SERVER_URL);
+        if domain != primary {
+            candidates.push(domain);
+        }
+    }
+
+    candidates
 }
 
 impl App for HostApp {
