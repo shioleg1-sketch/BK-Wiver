@@ -144,11 +144,7 @@ impl StreamCodecPreference {
 }
 
 fn default_stream_codec_preference() -> StreamCodecPreference {
-    if cfg!(windows) {
-        StreamCodecPreference::Vp8
-    } else {
-        StreamCodecPreference::H264
-    }
+    StreamCodecPreference::H264
 }
 
 impl StreamQualityProfile {
@@ -451,7 +447,7 @@ impl ConsoleApp {
             media_changed_frame_count: 0,
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
-            stream_quality_profile: StreamQualityProfile::Balanced,
+            stream_quality_profile: StreamQualityProfile::Sharp,
             stream_codec_preference: default_stream_codec_preference(),
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,

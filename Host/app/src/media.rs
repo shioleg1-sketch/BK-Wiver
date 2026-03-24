@@ -96,7 +96,7 @@ impl StreamProfile {
         match self {
             Self::Fast => (960, 540),
             Self::Balanced => (1280, 720),
-            Self::Sharp => (1600, 900),
+            Self::Sharp => (1920, 1080),
         }
     }
 
@@ -106,7 +106,7 @@ impl StreamProfile {
 
     fn target_fps(self) -> u32 {
         match self {
-            Self::Fast => 36,
+            Self::Fast => 30,
             Self::Balanced => 30,
             Self::Sharp => 30,
         }
@@ -116,7 +116,7 @@ impl StreamProfile {
         match self {
             Self::Fast => "35",
             Self::Balanced => "31",
-            Self::Sharp => "27",
+            Self::Sharp => "23",
         }
     }
 
@@ -124,7 +124,7 @@ impl StreamProfile {
         match self {
             Self::Fast => "2600k",
             Self::Balanced => "5200k",
-            Self::Sharp => "9000k",
+            Self::Sharp => "12000k",
         }
     }
 

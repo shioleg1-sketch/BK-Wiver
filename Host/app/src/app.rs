@@ -825,7 +825,7 @@ impl HostApp {
         }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let profile = Arc::new(Mutex::new(media::StreamProfile::Balanced));
+        let profile = Arc::new(Mutex::new(media::StreamProfile::Sharp));
         let codec_preference = Arc::new(Mutex::new(media::StreamCodec::H264));
         media::spawn_stream(
             self.active_server_url(),
