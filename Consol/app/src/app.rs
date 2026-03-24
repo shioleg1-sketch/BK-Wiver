@@ -617,12 +617,17 @@ impl ConsoleApp {
                         );
                     }
                 }
-                SignalEvent::Disconnected => {
-                    logging::append_log("WARN", "signal", "disconnected, reconnecting");
+                SignalEvent::Disconnected { reason } => {
+                    logging::append_log(
+                        "WARN",
+                        "signal",
+                        format!("disconnected, reconnecting: {}", reason),
+                    );
                     if !self.using_demo_data {
                         self.connection_note = format!(
-                            "Подключено к {}. Signal channel переподключается.",
-                            normalize_server_url(&self.server_url)
+                            "Подключено к {}. Signal channel переподключается: {}.",
+                            normalize_server_url(&self.server_url),
+                            reason
                         );
                     }
                 }

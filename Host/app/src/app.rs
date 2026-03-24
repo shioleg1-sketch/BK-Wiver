@@ -580,12 +580,17 @@ impl HostApp {
                         "connected".to_owned(),
                     );
                 }
-                SignalEvent::Disconnected => {
-                    logging::append_log("WARN", "signal", "disconnected, reconnecting");
+                SignalEvent::Disconnected { reason } => {
+                    logging::append_log(
+                        "WARN",
+                        "signal",
+                        format!("disconnected, reconnecting: {}", reason),
+                    );
                     let current = self.agent_status.clone().unwrap_or_default();
+                    let runtime_message = format!("Signal channel переподключается: {}", reason);
                     self.update_agent_runtime(
                         "running",
-                        "Signal channel переподключается.",
+                        &runtime_message,
                         current.session_id,
                         current.session_role,
                         current.session_peer,

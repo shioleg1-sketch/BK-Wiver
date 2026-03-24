@@ -3,7 +3,7 @@ use std::{
     io::ErrorKind,
     sync::{Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Sender, unbounded};
@@ -14,7 +14,9 @@ use url::Url;
 #[derive(Clone)]
 pub enum SignalEvent {
     Connected,
-    Disconnected,
+    Disconnected {
+        reason: String,
+    },
     SessionRequested {
         session_id: String,
         from_user_id: String,
@@ -45,6 +47,10 @@ pub enum SignalEvent {
     },
 }
 
+const SIGNAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SIGNAL_PING_INTERVAL: Duration = Duration::from_secs(10);
+const SIGNAL_RECONNECT_DELAYS_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
+
 static SIGNAL_OUTBOUND: OnceLock<Mutex<HashMap<String, Sender<Value>>>> = OnceLock::new();
 
 fn outbound_registry() -> &'static Mutex<HashMap<String, Sender<Value>>> {
@@ -60,8 +66,11 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
 
     thread::spawn(move || {
         let mut was_connected = false;
+        let mut reconnect_attempt = 0usize;
         let Ok(url) = signal_url(&server_url, &token) else {
-            let _ = event_tx.send(SignalEvent::Disconnected);
+            let _ = event_tx.send(SignalEvent::Disconnected {
+                reason: "invalid websocket url".to_owned(),
+            });
             return;
         };
 
@@ -70,10 +79,13 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                 Ok((mut socket, _)) => {
                     // Увеличиваем таймаут чтения до 10 секунд для стабильности соединения
                     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                        let _ = stream.set_read_timeout(Some(SIGNAL_READ_TIMEOUT));
                     }
                     was_connected = true;
+                    reconnect_attempt = 0;
                     let _ = event_tx.send(SignalEvent::Connected);
+                    let mut last_ping_at = Instant::now();
+                    let mut disconnect_reason = "websocket closed".to_owned();
 
                     loop {
                         loop {
@@ -83,12 +95,22 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                                         .send(Message::Text(payload.to_string().into()))
                                         .is_err()
                                     {
+                                        disconnect_reason =
+                                            "failed to send queued signal message".to_owned();
                                         break;
                                     }
                                 }
                                 Err(crossbeam_channel::TryRecvError::Empty) => break,
                                 Err(crossbeam_channel::TryRecvError::Disconnected) => return,
                             }
+                        }
+
+                        if last_ping_at.elapsed() >= SIGNAL_PING_INTERVAL {
+                            if socket.send(Message::Ping(Vec::new().into())).is_err() {
+                                disconnect_reason = "failed to send ping".to_owned();
+                                break;
+                            }
+                            last_ping_at = Instant::now();
                         }
 
                         match socket.read() {
@@ -100,31 +122,49 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                             Ok(Message::Ping(payload)) => {
                                 let _ = socket.send(Message::Pong(payload));
                             }
-                            Ok(Message::Pong(_)) => {}
+                            Ok(Message::Pong(_)) => {
+                                last_ping_at = Instant::now();
+                            }
                             Ok(Message::Close(_)) => break,
                             Ok(_) => {}
                             Err(tungstenite::Error::Io(error))
                                 if matches!(
                                     error.kind(),
                                     ErrorKind::WouldBlock | ErrorKind::TimedOut
-                                ) => {}
-                            Err(_) => break,
+                                ) =>
+                            {
+                                disconnect_reason = format!("read timeout: {}", error);
+                                break;
+                            }
+                            Err(error) => {
+                                disconnect_reason = format!("socket error: {error}");
+                                break;
+                            }
                         }
                     }
+
+                    if was_connected {
+                        let _ = event_tx.send(SignalEvent::Disconnected {
+                            reason: disconnect_reason,
+                        });
+                        was_connected = false;
+                    }
                 }
-                Err(_) => {
+                Err(error) => {
                     if !was_connected {
-                        let _ = event_tx.send(SignalEvent::Disconnected);
+                        let _ = event_tx.send(SignalEvent::Disconnected {
+                            reason: format!("connect failed: {error}"),
+                        });
                     }
                 }
             }
 
-            if was_connected {
-                let _ = event_tx.send(SignalEvent::Disconnected);
-                was_connected = false;
-            }
-            // Экспоненциальная задержка перед переподключением: 2с, 4с, 8с, макс. 30с
-            thread::sleep(Duration::from_secs(2));
+            let delay_ms = SIGNAL_RECONNECT_DELAYS_MS
+                .get(reconnect_attempt)
+                .copied()
+                .unwrap_or(*SIGNAL_RECONNECT_DELAYS_MS.last().unwrap_or(&10_000));
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            thread::sleep(Duration::from_millis(delay_ms));
         }
     });
 }
