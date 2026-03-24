@@ -48,7 +48,17 @@
       "Bash(docker compose config)",
       "Bash(docker compose down *)",
       "Bash(docker compose down)",
-      "Bash(docker ps *)"
+      "Bash(docker ps *)",
+      "Bash(ssh-agent *)",
+      "Bash(cat)",
+      "Bash(host *)",
+      "Bash(hostname *)",
+      "Bash(user *)",
+      "Bash(identityfile *)",
+      "Bash(identitiesonly *)",
+      "Bash(addkeystoagent *)",
+      "Bash(eof)",
+      "Bash(echo *)"
     ]
   },
   "$version": 3
