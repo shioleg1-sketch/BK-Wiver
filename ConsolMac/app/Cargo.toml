@@ -4,6 +4,8 @@ version = "0.1.30"
 edition = "2024"
 build = "build.rs"
 
+[workspace]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 crossbeam-channel = "0.5"
 eframe = { version = "0.33", features = ["wgpu"] }
