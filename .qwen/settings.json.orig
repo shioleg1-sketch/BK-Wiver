@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash *)",
+      "Bash(docker compose *)",
+      "Bash(curl *)",
+      "Bash(mkdir *)",
+      "Bash(mv *)",
+      "Bash(rm *)",
+      "Bash(git init)",
+      "Bash(git branch *)",
+      "Bash(true)",
+      "Bash(git remote *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(cp *)",
+      "Bash(git reset *)",
+      "Bash(git diff *)",
+      "Bash(git checkout *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}

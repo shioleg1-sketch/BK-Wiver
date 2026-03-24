@@ -1,0 +1,23 @@
+Copy these files and folders from this Update directory into /opt/bk-wiver on the Ubuntu server:
+
+Cargo.toml
+Cargo.lock
+docker-compose.yml
+update-server-ubuntu.sh
+README.txt
+copy-to-server.txt
+apps/server/Cargo.toml
+apps/server/Dockerfile
+apps/server/src/main.rs
+apps/server/src/server.rs
+deploy/ubuntu/docker-compose.lan.yml
+
+Important:
+- do not overwrite /opt/bk-wiver/.env if it already exists
+- .env must contain:
+  SERVER_PUBLIC_URL=http://172.16.100.164:8080
+
+Commands after copying:
+chmod +x /opt/bk-wiver/update-server-ubuntu.sh
+cd /opt/bk-wiver
+./update-server-ubuntu.sh
