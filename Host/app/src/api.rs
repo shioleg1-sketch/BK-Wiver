@@ -1,6 +1,24 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
+fn normalize_server_url(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_owned()
+}
+
+fn is_loopback_server_url(value: &str) -> bool {
+    let normalized = normalize_server_url(value).to_ascii_lowercase();
+    normalized.starts_with("http://127.0.0.1")
+        || normalized.starts_with("https://127.0.0.1")
+        || normalized.starts_with("ws://127.0.0.1")
+        || normalized.starts_with("wss://127.0.0.1")
+        || normalized.starts_with("http://localhost")
+        || normalized.starts_with("https://localhost")
+        || normalized.starts_with("ws://localhost")
+        || normalized.starts_with("wss://localhost")
+        || normalized == "127.0.0.1"
+        || normalized == "localhost"
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct DeviceRegistration {
     #[serde(rename = "deviceId")]
@@ -89,6 +107,7 @@ pub fn connect_host(
     host_info: HostInfoPayload,
     permissions: PermissionStatusPayload,
 ) -> Result<DeviceRegistration, String> {
+    let fallback_server_url = normalize_server_url(server_url);
     let login_response = client
         .post(format!("{server_url}/api/v1/auth/login"))
         .json(&DesktopLoginRequest {
@@ -130,9 +149,15 @@ pub fn connect_host(
         ));
     }
 
-    register_response
+    let mut registration = register_response
         .json::<DeviceRegistration>()
-        .map_err(|error| format!("Некорректный ответ регистрации: {error}"))
+        .map_err(|error| format!("Некорректный ответ регистрации: {error}"))?;
+
+    if is_loopback_server_url(&registration.server_url) && !fallback_server_url.is_empty() {
+        registration.server_url = fallback_server_url;
+    }
+
+    Ok(registration)
 }
 
 pub fn send_heartbeat(
@@ -146,14 +171,13 @@ pub fn send_heartbeat(
         return Ok(());
     }
 
-    let server_url = if registration.server_url.trim().is_empty() {
-        fallback_server_url.trim().trim_end_matches('/').to_owned()
+    let fallback_server_url = normalize_server_url(fallback_server_url);
+    let server_url = if registration.server_url.trim().is_empty()
+        || is_loopback_server_url(&registration.server_url)
+    {
+        fallback_server_url
     } else {
-        registration
-            .server_url
-            .trim()
-            .trim_end_matches('/')
-            .to_owned()
+        normalize_server_url(&registration.server_url)
     };
 
     if server_url.is_empty() {
