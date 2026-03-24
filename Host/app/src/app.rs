@@ -103,6 +103,7 @@ struct HostMediaSession {
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<media::StreamProfile>>,
     codec_preference: Arc<Mutex<media::StreamCodec>>,
+    last_profile_change_at_ms: Arc<Mutex<u64>>,
 }
 
 enum HostUiCommand {
@@ -841,6 +842,7 @@ impl HostApp {
                 stop_flag,
                 profile,
                 codec_preference,
+                last_profile_change_at_ms: Arc::new(Mutex::new(now_ms())),
             },
         );
     }
@@ -848,10 +850,40 @@ impl HostApp {
     fn update_media_preferences(&mut self, session_id: &str, profile: &str, codec: Option<&str>) {
         if let Some(session) = self.media_sessions.get(session_id) {
             let mut status_parts = Vec::new();
+            let requested_profile = media::StreamProfile::from_wire(profile);
+            let now = now_ms();
 
             if let Ok(mut current_profile) = session.profile.lock() {
-                *current_profile = media::StreamProfile::from_wire(profile);
-                status_parts.push(format!("качество {}", current_profile.wire_name()));
+                let current_profile_value = *current_profile;
+                let allow_profile_change = if requested_profile == current_profile_value {
+                    true
+                } else if let Ok(last_change_at_ms) = session.last_profile_change_at_ms.lock() {
+                    now.saturating_sub(*last_change_at_ms) >= 5_000
+                } else {
+                    true
+                };
+
+                if allow_profile_change {
+                    *current_profile = requested_profile;
+                    if requested_profile != current_profile_value
+                        && let Ok(mut last_change_at_ms) = session.last_profile_change_at_ms.lock()
+                    {
+                        *last_change_at_ms = now;
+                    }
+                    status_parts.push(format!("качество {}", current_profile.wire_name()));
+                } else {
+                    logging::append_log(
+                        "INFO",
+                        "media.feedback",
+                        format!(
+                            "session_id={} ignored_profile_change current={} requested={} cooldown_ms={}",
+                            session_id,
+                            current_profile_value.wire_name(),
+                            requested_profile.wire_name(),
+                            5_000
+                        ),
+                    );
+                }
             }
 
             if let Some(codec) = codec

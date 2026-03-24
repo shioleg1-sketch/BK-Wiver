@@ -766,7 +766,7 @@ impl ConsoleApp {
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
-        self.stream_quality_profile = StreamQualityProfile::Balanced;
+        self.stream_quality_profile = StreamQualityProfile::Sharp;
         self.stream_codec_preference = default_stream_codec_preference();
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;
