@@ -16,7 +16,7 @@ FFMPEG_SOURCE="$(command -v ffmpeg || true)"
 rm -rf "$TMP_DIR" "$APP_DIR" "$DMG_PATH"
 mkdir -p "$TMP_DIR" "$DIST_DIR"
 
-cargo build --release -p bk-wiver-console-macos
+cargo build --release --manifest-path "$CRATE_DIR/Cargo.toml"
 
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
@@ -46,8 +46,11 @@ sips -z 512 512   "$LOGO_SOURCE" --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/
 sips -z 512 512   "$LOGO_SOURCE" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
 sips -z 1024 1024 "$LOGO_SOURCE" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null
 
-iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
-cp "$ICNS_PATH" "$APP_DIR/Contents/Resources/app.icns"
+if iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"; then
+  cp "$ICNS_PATH" "$APP_DIR/Contents/Resources/app.icns"
+else
+  echo "Warning: iconutil failed to build app.icns, continuing without bundled app icon"
+fi
 
 hdiutil create \
   -volname "$APP_NAME" \
