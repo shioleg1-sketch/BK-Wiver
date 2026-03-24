@@ -338,7 +338,9 @@ impl HostApp {
         self.service_status = load_json::<ServiceRuntimeStatus>("service-status.json");
         self.agent_status = load_json::<AgentRuntimeStatus>("agent-status.json");
         let registration_server_url = normalize_server_url(&self.registration.server_url);
-        if !registration_server_url.is_empty() && !is_loopback_server_url(&registration_server_url)
+        if self.server_url_input.trim().is_empty()
+            && !registration_server_url.is_empty()
+            && !is_loopback_server_url(&registration_server_url)
         {
             self.server_url_input = registration_server_url;
         }
@@ -360,6 +362,15 @@ impl HostApp {
 
     fn normalized_server_url(&self) -> String {
         normalize_server_url(&self.server_url_input)
+    }
+
+    fn active_server_url(&self) -> String {
+        let current = self.normalized_server_url();
+        if !current.is_empty() {
+            return current;
+        }
+
+        normalize_server_url(&self.registration.server_url)
     }
 
     fn desktop_version(&self) -> DesktopVersion {
@@ -497,7 +508,7 @@ impl HostApp {
         api::send_heartbeat(
             &self.client,
             &self.registration,
-            &self.normalized_server_url(),
+            &self.active_server_url(),
             self.permissions_payload(),
             now_ms(),
         )?;
@@ -532,15 +543,7 @@ impl HostApp {
     }
 
     fn ensure_signal_listener(&mut self) {
-        let server_url = if self.registration.server_url.trim().is_empty() {
-            self.normalized_server_url()
-        } else {
-            self.registration
-                .server_url
-                .trim()
-                .trim_end_matches('/')
-                .to_owned()
-        };
+        let server_url = self.active_server_url();
 
         if server_url.is_empty() || self.registration.device_token.trim().is_empty() {
             return;
@@ -610,7 +613,7 @@ impl HostApp {
                     );
 
                     if let Err(error) = signal::send_session_accepted(
-                        &self.registration.server_url,
+                        &self.active_server_url(),
                         &self.registration.device_token,
                         &session_id,
                     ) {
@@ -810,7 +813,7 @@ impl HostApp {
 
     fn start_media_stream(&mut self, session_id: &str) {
         if self.media_sessions.contains_key(session_id)
-            || self.registration.server_url.trim().is_empty()
+            || self.active_server_url().trim().is_empty()
             || self.registration.device_token.trim().is_empty()
         {
             return;
@@ -820,7 +823,7 @@ impl HostApp {
         let profile = Arc::new(Mutex::new(media::StreamProfile::Balanced));
         let codec_preference = Arc::new(Mutex::new(media::StreamCodec::H264));
         media::spawn_stream(
-            self.registration.server_url.clone(),
+            self.active_server_url(),
             self.registration.device_token.clone(),
             session_id.to_owned(),
             stop_flag.clone(),

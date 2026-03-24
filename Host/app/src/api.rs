@@ -5,20 +5,6 @@ fn normalize_server_url(value: &str) -> String {
     value.trim().trim_end_matches('/').to_owned()
 }
 
-fn is_loopback_server_url(value: &str) -> bool {
-    let normalized = normalize_server_url(value).to_ascii_lowercase();
-    normalized.starts_with("http://127.0.0.1")
-        || normalized.starts_with("https://127.0.0.1")
-        || normalized.starts_with("ws://127.0.0.1")
-        || normalized.starts_with("wss://127.0.0.1")
-        || normalized.starts_with("http://localhost")
-        || normalized.starts_with("https://localhost")
-        || normalized.starts_with("ws://localhost")
-        || normalized.starts_with("wss://localhost")
-        || normalized == "127.0.0.1"
-        || normalized == "localhost"
-}
-
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct DeviceRegistration {
     #[serde(rename = "deviceId")]
@@ -172,9 +158,7 @@ pub fn send_heartbeat(
     }
 
     let fallback_server_url = normalize_server_url(fallback_server_url);
-    let server_url = if registration.server_url.trim().is_empty()
-        || is_loopback_server_url(&registration.server_url)
-    {
+    let server_url = if !fallback_server_url.is_empty() {
         fallback_server_url
     } else {
         normalize_server_url(&registration.server_url)
