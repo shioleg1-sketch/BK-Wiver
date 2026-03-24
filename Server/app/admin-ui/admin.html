@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BK-Wiver Admin</title>
+  <!-- HTMX для динамических запросов -->
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <!-- Alpine.js для реактивности -->
+  <script defer src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"></script>
+  <style>
+    :root {
+      --bg: #f3f0e8;
+      --panel: #fffdf7;
+      --ink: #1e2a33;
+      --muted: #65727d;
+      --line: #d8cfbf;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --danger: #b91c1c;
+      --success: #059669;
+      --warning: #d97706;
+      --soft: #ece4d6;
+      --soft-2: #f7efe3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(135deg, #efe8db, #f8f5ee 55%, #ece7de);
+    }
+    .shell { max-width: 1480px; margin: 0 auto; padding: 24px; }
+    .hero { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 20px; flex-wrap: wrap; }
+    .hero h1 { margin: 0; font-size: 38px; line-height: 1; letter-spacing: -0.03em; }
+    .hero p { margin: 8px 0 0; color: var(--muted); max-width: 780px; }
+    .panel {
+      background: rgba(255,253,247,0.9);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 20px 50px rgba(31, 41, 55, 0.08);
+      backdrop-filter: blur(10px);
+    }
+    .login, .toolbar, .content { padding: 18px; }
+    .toolbar, .content { margin-top: 18px; }
+    .filters, .token-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+    label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px; }
+    input, select, button { width: 100%; border-radius: 12px; border: 1px solid var(--line); padding: 11px 12px; font: inherit; background: white; color: var(--ink); }
+    button { cursor: pointer; background: var(--ink); color: white; border-color: var(--ink); transition: transform .12s ease, opacity .12s ease; }
+    button.secondary { background: var(--soft); color: var(--ink); border-color: var(--line); }
+    button.warn { background: var(--danger); border-color: var(--danger); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .checkbox { display: flex; align-items: center; gap: 10px; }
+    .checkbox input { width: auto; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tabs button { width: auto; padding: 10px 16px; }
+    .tabs button.active { background: var(--accent); border-color: var(--accent); }
+    .page { display: none; }
+    .page.active { display: block; }
+    .section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 12px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--soft); }
+    th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    tr:hover td { background: var(--soft-2); }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge.ok { background: #d1fae5; color: #065f46; }
+    .badge.offline { background: #fee2e2; color: #991b1b; }
+    .badge.warn { background: #fef3c7; color: #92400e; }
+    .status { padding: 10px 14px; border-radius: 10px; font-size: 13px; }
+    .status.ok { background: #d1fae5; color: #065f46; }
+    .status.error { background: #fee2e2; color: #991b1b; }
+    .hidden { display: none !important; }
+    .inventory-panel { margin-top: 16px; padding: 16px; background: var(--soft-2); border-radius: 12px; }
+    .inventory-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 12px; }
+    .inventory-item { background: white; padding: 12px; border-radius: 8px; border: 1px solid var(--line); }
+    .inventory-item label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .inventory-item div { font-size: 14px; font-weight: 500; }
+    @media (max-width: 768px) { .hero { flex-direction: column; align-items: flex-start; } .filters, .token-form { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body x-data="adminApp()" x-init="init()">
+  <div class="shell">
+    <!-- Login Panel -->
+    <div class="panel login" id="loginPanel" x-show="!authenticated">
+      <div class="hero">
+        <div>
+          <h1>BK-Wiver Admin</h1>
+          <p>Sign in to manage devices, users, and enrollment tokens.</p>
+        </div>
+      </div>
+      <div class="login-grid">
+        <div>
+          <label for="loginInput">Login</label>
+          <input id="loginInput" x-model="loginForm.login" placeholder="admin">
+        </div>
+        <div>
+          <label for="passwordInput">Password</label>
+          <input id="passwordInput" type="password" x-model="loginForm.password" placeholder="••••••••">
+        </div>
+        <div>
+          <button @click="login()" :disabled="loading">Sign In</button>
+        </div>
+      </div>
+      <div class="status error" x-show="loginError" x-text="loginError" style="margin-top: 12px;"></div>
+    </div>
+
+    <!-- Main App -->
+    <div x-show="authenticated">
+      <div class="panel toolbar" id="toolbarPanel">
+        <div class="hero">
+          <div>
+            <h1 style="font-size: 28px;">BK-Wiver Administration</h1>
+            <p class="small muted">Server: <span x-text="serverUrl"></span> | Admin: <span x-text="adminName"></span> (<span x-text="adminRole"></span>)</p>
+          </div>
+          <div class="tabs">
+            <button :class="{ active: activeTab === 'computers' }" @click="activeTab = 'computers'">Computers</button>
+            <button :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">Users</button>
+            <button :class="{ active: activeTab === 'inventory' }" @click="activeTab = 'inventory'">Inventory History</button>
+            <button :class="{ active: activeTab === 'audit' }" @click="activeTab = 'audit'">Audit</button>
+            <button :class="{ active: activeTab === 'tokens' }" @click="activeTab = 'tokens'">Tokens</button>
+            <button class="secondary" @click="logout()">Logout</button>
+          </div>
+        </div>
+        <div class="status ok" x-show="statusMessage" x-text="statusMessage"></div>
+      </div>
+
+      <div class="panel content" id="contentPanel">
+        <!-- Computers Page -->
+        <div class="page" :class="{ active: activeTab === 'computers' }" id="page-computers">
+          <div class="section-head">
+            <div>
+              <strong id="deviceCount">0 devices</strong>
+              <div class="muted small">All registered devices with online/offline status.</div>
+            </div>
+            <button class="secondary" @click="exportCSV()">Export CSV</button>
+          </div>
+          <div class="filters" style="margin-bottom: 16px;">
+            <div>
+              <label for="deviceFilter">Search</label>
+              <input id="deviceFilter" x-model="filters.device" placeholder="Hostname, IP, CPU, username...">
+            </div>
+            <div>
+              <label for="deviceGroup">Group</label>
+              <select id="deviceGroup" x-model="filters.group">
+                <option value="">All Groups</option>
+                <template x-for="group in uniqueGroups" :key="group">
+                  <option :value="group" x-text="group"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label for="deviceStatus">Status</label>
+              <select id="deviceStatus" x-model="filters.status">
+                <option value="">All</option>
+                <option value="online">Online</option>
+                <option value="offline">Offline</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Device Name</th>
+                  <th>Hostname</th>
+                  <th>OS</th>
+                  <th>CPU</th>
+                  <th>RAM</th>
+                  <th>IP Address</th>
+                  <th>User</th>
+                  <th>Group</th>
+                  <th>Last Seen</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="device in filteredDevices" :key="device.deviceId">
+                  <tr>
+                    <td><span class="badge" :class="device.online ? 'ok' : 'offline'" x-text="device.online ? 'Online' : 'Offline'"></span></td>
+                    <td x-text="device.deviceName"></td>
+                    <td x-text="device.hostInfo.hostname"></td>
+                    <td><span x-text="device.hostInfo.os"></span> <span class="muted" x-text="device.hostInfo.osVersion"></span></td>
+                    <td x-text="device.hostInfo.cpu || 'N/A'"></td>
+                    <td x-text="device.hostInfo.ramTotalMb ? (device.hostInfo.ramTotalMb / 1024).toFixed(1) + ' GB' : 'N/A'"></td>
+                    <td><span x-text="(device.hostInfo.ipAddresses || []).slice(0, 2).join(', ')"></span></td>
+                    <td x-text="device.hostInfo.username"></td>
+                    <td x-text="device.groupName || '—'"></td>
+                    <td><span class="muted small" x-text="formatTimeAgo(device.lastSeenMs)"></span></td>
+                    <td>
+                      <button class="secondary" style="width: auto; padding: 6px 10px; font-size: 12px;" @click="viewInventory(device)">Inventory</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <!-- Inventory Detail Panel -->
+          <div class="inventory-panel" x-show="selectedDevice" x-cloak>
+            <div class="section-head">
+              <strong>Inventory History: <span x-text="selectedDevice?.deviceName"></span></strong>
+              <button class="secondary" style="width: auto;" @click="selectedDevice = null">Close</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>CPU</th>
+                    <th>RAM</th>
+                    <th>Motherboard</th>
+                    <th>IP Addresses</th>
+                    <th>OS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="record in selectedDeviceInventory" :key="record.recordId">
+                    <tr>
+                      <td><span class="muted small" x-text="formatDateTime(record.recordedAtMs)"></span></td>
+                      <td x-text="record.cpu || 'N/A'"></td>
+                      <td x-text="record.ramTotalMb ? (record.ramTotalMb / 1024).toFixed(1) + ' GB' : 'N/A'"></td>
+                      <td x-text="record.motherboard || 'N/A'"></td>
+                      <td><span class="muted small" x-text="record.ipAddresses || 'N/A'"></span></td>
+                      <td><span x-text="record.os"></span> <span class="muted" x-text="record.osVersion"></span></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Users Page -->
+        <div class="page" :class="{ active: activeTab === 'users' }" id="page-users">
+          <div class="section-head">
+            <div>
+              <strong id="userCount">0 users</strong>
+              <div class="muted small">Desktop users who have logged in.</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Login</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Desktop Version</th>
+                  <th>Last Login</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="user in users" :key="user.userId">
+                  <tr>
+                    <td x-text="user.login"></td>
+                    <td><span class="badge warn" x-text="user.role"></span></td>
+                    <td><span class="badge" :class="user.blocked ? 'offline' : 'ok'" x-text="user.blocked ? 'Blocked' : 'Active'"></span></td>
+                    <td><span x-text="user.desktopVersion.version"></span> <span class="muted small" x-text="user.desktopVersion.commit"></span></td>
+                    <td><span class="muted small" x-text="formatTimeAgo(user.lastLoginAtMs)"></span></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Inventory History Page -->
+        <div class="page" :class="{ active: activeTab === 'inventory' }" id="page-inventory">
+          <div class="section-head">
+            <div>
+              <strong>Inventory History</strong>
+              <div class="muted small">Recent hardware changes across all devices.</div>
+            </div>
+            <div style="display: flex; gap: 12px;">
+              <input x-model="inventoryFilters.deviceId" placeholder="Filter by device ID..." style="width: 250px;">
+              <select x-model="inventoryFilters.limit">
+                <option value="20">Last 20</option>
+                <option value="50" selected>Last 50</option>
+                <option value="100">Last 100</option>
+              </select>
+              <button @click="loadInventoryHistory()">Refresh</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Record ID</th>
+                  <th>Device ID</th>
+                  <th>Hostname</th>
+                  <th>CPU</th>
+                  <th>RAM</th>
+                  <th>Motherboard</th>
+                  <th>IP Addresses</th>
+                  <th>OS</th>
+                  <th>Recorded</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="record in inventoryHistory" :key="record.recordId">
+                  <tr>
+                    <td><span class="muted small" x-text="record.recordId"></span></td>
+                    <td><span class="muted small" x-text="record.deviceId"></span></td>
+                    <td x-text="record.hostname"></td>
+                    <td x-text="record.cpu || 'N/A'"></td>
+                    <td x-text="record.ramTotalMb ? (record.ramTotalMb / 1024).toFixed(1) + ' GB' : 'N/A'"></td>
+                    <td x-text="record.motherboard || 'N/A'"></td>
+                    <td><span class="muted small" x-text="record.ipAddresses || 'N/A'"></span></td>
+                    <td><span x-text="record.os"></span> <span class="muted" x-text="record.osVersion"></span></td>
+                    <td><span class="muted small" x-text="formatDateTime(record.recordedAtMs)"></span></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Audit Page -->
+        <div class="page" :class="{ active: activeTab === 'audit' }" id="page-audit">
+          <div class="section-head">
+            <div>
+              <strong>Audit Log</strong>
+              <div class="muted small">Recent administrative and system events.</div>
+            </div>
+            <select x-model="auditLimit" @change="loadAudit()" style="width: auto;">
+              <option value="50">50 events</option>
+              <option value="100" selected>100 events</option>
+              <option value="250">250 events</option>
+              <option value="500">500 events</option>
+            </select>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Actor</th>
+                  <th>Action</th>
+                  <th>Target</th>
+                  <th>Event ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="event in auditEvents" :key="event.eventId">
+                  <tr>
+                    <td><span class="muted small" x-text="formatDateTime(event.createdAtMs)"></span></td>
+                    <td><span class="muted small" x-text="event.actorType"></span> / <span x-text="event.actorId"></span></td>
+                    <td><span class="badge warn" x-text="event.action"></span></td>
+                    <td><span class="muted small" x-text="event.targetType"></span> / <span x-text="event.targetId"></span></td>
+                    <td><span class="muted small" x-text="event.eventId"></span></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tokens Page -->
+        <div class="page" :class="{ active: activeTab === 'tokens' }" id="page-tokens">
+          <div class="section-head">
+            <div>
+              <strong id="tokenCount">0 tokens</strong>
+              <div class="muted small">Enrollment tokens for host installation.</div>
+            </div>
+          </div>
+          <div class="token-form" style="margin-bottom: 16px;">
+            <div>
+              <label for="tokenComment">Comment</label>
+              <input id="tokenComment" x-model="tokenForm.comment" placeholder="Moscow office / QA / batch 03">
+            </div>
+            <div>
+              <label for="tokenExpiresDays">Expires In</label>
+              <select id="tokenExpiresDays" x-model="tokenForm.expiresDays">
+                <option value="1">1 day</option>
+                <option value="7" selected>7 days</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+              </select>
+            </div>
+            <div>
+              <label>&nbsp;</label>
+              <div class="checkbox">
+                <input id="tokenSingleUse" type="checkbox" x-model="tokenForm.singleUse" checked>
+                <span>Single-use token</span>
+              </div>
+            </div>
+            <div>
+              <button @click="createToken()" :disabled="loading">Create Token</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Comment</th>
+                  <th>Token</th>
+                  <th>Created By</th>
+                  <th>Created</th>
+                  <th>Expires</th>
+                  <th>Used</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="token in tokens" :key="token.tokenId">
+                  <tr>
+                    <td>
+                      <span class="badge" :class="token.usedAtMs ? 'offline' : (token.expiresAtMs < Date.now() ? 'offline' : 'ok')"
+                            x-text="token.usedAtMs ? 'Used' : (token.expiresAtMs < Date.now() ? 'Expired' : 'Active')"></span>
+                    </td>
+                    <td x-text="token.comment"></td>
+                    <td><code style="font-size: 11px;" x-text="token.token"></code></td>
+                    <td><span class="muted small" x-text="token.createdByUserId"></span></td>
+                    <td><span class="muted small" x-text="formatDateTime(token.createdAtMs)"></span></td>
+                    <td><span class="muted small" x-text="formatDateTime(token.expiresAtMs)"></span></td>
+                    <td><span class="muted small" x-text="token.usedAtMs ? formatDateTime(token.usedAtMs) : '—'"></span></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function adminApp() {
+      return {
+        authenticated: false,
+        loading: false,
+        activeTab: 'computers',
+        serverUrl: '',
+        adminName: '',
+        adminRole: '',
+        loginForm: { login: '', password: '' },
+        loginError: '',
+        statusMessage: '',
+        devices: [],
+        users: [],
+        auditEvents: [],
+        tokens: [],
+        inventoryHistory: [],
+        selectedDevice: null,
+        selectedDeviceInventory: [],
+        filters: { device: '', group: '', status: '' },
+        inventoryFilters: { deviceId: '', limit: '50' },
+        auditLimit: '100',
+        tokenForm: { comment: '', expiresDays: '7', singleUse: true },
+
+        async init() {
+          const token = localStorage.getItem('bk_admin_token');
+          if (token) {
+            this.authenticated = true;
+            await this.refreshAll();
+          }
+        },
+
+        async login() {
+          this.loading = true;
+          this.loginError = '';
+          try {
+            const res = await fetch('/api/v1/admin/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ login: this.loginForm.login, password: this.loginForm.password })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error?.message || 'Login failed');
+            localStorage.setItem('bk_admin_token', data.accessToken);
+            this.authenticated = true;
+            this.adminName = data.login;
+            this.adminRole = data.role;
+            this.statusMessage = `Welcome, ${data.login}!`;
+            await this.refreshAll();
+          } catch (e) {
+            this.loginError = e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        logout() {
+          localStorage.removeItem('bk_admin_token');
+          this.authenticated = false;
+          this.loginForm = { login: '', password: '' };
+          this.statusMessage = 'Logged out';
+        },
+
+        async refreshAll() {
+          this.statusMessage = 'Refreshing data...';
+          await Promise.all([
+            this.loadDevices(),
+            this.loadUsers(),
+            this.loadAudit(),
+            this.loadTokens()
+          ]);
+          this.statusMessage = 'Data refreshed';
+          setTimeout(() => { this.statusMessage = ''; }, 3000);
+        },
+
+        async loadDevices() {
+          const res = await fetch('/api/v1/admin/devices', {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.devices = data.devices || [];
+        },
+
+        async loadUsers() {
+          const res = await fetch('/api/v1/admin/users', {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.users = data.users || [];
+        },
+
+        async loadAudit() {
+          const res = await fetch(`/api/v1/admin/audit?limit=${this.auditLimit}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.auditEvents = data.events || [];
+        },
+
+        async loadTokens() {
+          const res = await fetch('/api/v1/admin/enrollment-tokens', {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.tokens = data.enrollmentTokens || [];
+        },
+
+        async loadInventoryHistory() {
+          const params = new URLSearchParams({ limit: this.inventoryFilters.limit });
+          if (this.inventoryFilters.deviceId) params.set('device_id', this.inventoryFilters.deviceId);
+          const res = await fetch(`/api/v1/admin/inventory/history?${params}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.inventoryHistory = data.records || [];
+        },
+
+        async viewInventory(device) {
+          this.selectedDevice = device;
+          const res = await fetch(`/api/v1/admin/devices/${device.deviceId}/inventory`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}` }
+          });
+          const data = await res.json();
+          this.selectedDeviceInventory = data.records || [];
+        },
+
+        async createToken() {
+          this.loading = true;
+          const expiresAtMs = Date.now() + (parseInt(this.tokenForm.expiresDays) * 24 * 60 * 60 * 1000);
+          const res = await fetch('/api/v1/admin/enrollment-tokens', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${localStorage.getItem('bk_admin_token')}`
+            },
+            body: JSON.stringify({
+              comment: this.tokenForm.comment,
+              expiresAtMs,
+              singleUse: this.tokenForm.singleUse
+            })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error?.message || 'Failed to create token');
+          await this.loadTokens();
+          this.statusMessage = 'Token created';
+          setTimeout(() => { this.statusMessage = ''; }, 3000);
+          this.loading = false;
+        },
+
+        async exportCSV() {
+          window.open('/api/v1/admin/devices/export.csv', '_blank');
+        },
+
+        get uniqueGroups() {
+          const groups = new Set(this.devices.map(d => d.groupName).filter(Boolean));
+          return Array.from(groups);
+        },
+
+        get filteredDevices() {
+          return this.devices.filter(d => {
+            if (this.filters.group && d.groupName !== this.filters.group) return false;
+            if (this.filters.status && (this.filters.status === 'online' ? !d.online : d.online)) return false;
+            if (this.filters.device) {
+              const q = this.filters.device.toLowerCase();
+              const hay = `${d.deviceName} ${d.hostInfo.hostname} ${d.hostInfo.cpu} ${d.hostInfo.username} ${(d.hostInfo.ipAddresses || []).join(' ')}`.toLowerCase();
+              if (!hay.includes(q)) return false;
+            }
+            return true;
+          });
+        },
+
+        formatTimeAgo(ms) {
+          const diff = Date.now() - ms;
+          const min = Math.floor(diff / 60000);
+          if (min < 1) return 'just now';
+          if (min < 60) return `${min}m ago`;
+          const hr = Math.floor(min / 60);
+          if (hr < 24) return `${hr}h ago`;
+          const d = Math.floor(hr / 24);
+          return `${d}d ago`;
+        },
+
+        formatDateTime(ms) {
+          return new Date(ms).toLocaleString();
+        }
+      };
+    }
+  </script>
+</body>
+</html>

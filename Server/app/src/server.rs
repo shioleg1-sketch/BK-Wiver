@@ -48,6 +48,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/admin/enrollment-tokens",
             get(list_admin_enrollment_tokens).post(create_admin_enrollment_token),
         )
+        .route("/api/v1/admin/devices/{device_id}/inventory", get(get_device_inventory_history))
+        .route("/api/v1/admin/inventory/history", get(list_inventory_history))
         .route("/api/v1/admin/audit", get(list_audit_events))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
@@ -133,6 +135,8 @@ struct AdminLoginRequest {
 #[serde(rename_all = "camelCase")]
 struct AdminLoginResponse {
     admin_id: String,
+    login: String,
+    role: String,
     access_token: String,
     refresh_token: String,
 }
@@ -328,6 +332,53 @@ struct ListAuditEventsResponse {
     events: Vec<AuditEventSummary>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryHistoryRecord {
+    record_id: String,
+    device_id: String,
+    motherboard: Option<String>,
+    cpu: Option<String>,
+    ram_total_mb: Option<i64>,
+    ip_addresses: Option<String>,
+    mac_addresses: Option<String>,
+    os: String,
+    os_version: String,
+    arch: String,
+    username: String,
+    hostname: String,
+    recorded_at_ms: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListInventoryHistoryResponse {
+    records: Vec<InventoryHistoryRecord>,
+}
+
+#[derive(Deserialize, Default)]
+struct InventoryHistoryQuery {
+    device_id: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(FromRow)]
+struct InventoryRecord {
+    record_id: String,
+    device_id: String,
+    motherboard: Option<String>,
+    cpu: Option<String>,
+    ram_total_mb: Option<i64>,
+    ip_addresses: Option<String>,
+    mac_addresses: Option<String>,
+    os: String,
+    os_version: String,
+    arch: String,
+    username: String,
+    hostname: String,
+    recorded_at_ms: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateDeviceRequest {
@@ -493,7 +544,7 @@ async fn healthcheck(State(state): State<Arc<AppState>>) -> Result<Json<HealthRe
 }
 
 async fn admin_web_app() -> Html<&'static str> {
-    Html(ADMIN_WEB_APP)
+    Html(include_str!("admin-ui/admin.html"))
 }
 
 async fn signal_websocket(
@@ -653,7 +704,7 @@ async fn admin_login(
 
     let admin = sqlx::query(
         r#"
-        SELECT admin_id, blocked
+        SELECT admin_id, login, role, blocked
         FROM admins
         WHERE login = $1
         "#,
@@ -672,6 +723,8 @@ async fn admin_login(
             ));
         }
         let admin_id = row.get::<String, _>("admin_id");
+        let admin_login = row.get::<String, _>("login");
+        let admin_role = row.get::<String, _>("role");
         sqlx::query(
             r#"
             UPDATE admins
@@ -686,6 +739,20 @@ async fn admin_login(
         .map_err(|error| {
             ApiError::internal(format!("failed to update admin login state: {error}"))
         })?;
+        sqlx::query(
+            r#"
+            INSERT INTO admins (admin_id, login, role, blocked, last_login_at_ms)
+            VALUES ($1, $2, $3, FALSE, $4)
+            ON CONFLICT (admin_id) DO NOTHING
+            "#,
+        )
+        .bind(&admin_id)
+        .bind(&admin_login)
+        .bind(&admin_role)
+        .bind(now_ms_i64())
+        .execute(&state.db)
+        .await
+        .ok();
         admin_id
     } else {
         let admin_id = format!("adm_{}", short_id());
@@ -694,10 +761,11 @@ async fn admin_login(
             INSERT INTO admins (
                 admin_id,
                 login,
+                role,
                 blocked,
                 last_login_at_ms
             )
-            VALUES ($1, $2, FALSE, $3)
+            VALUES ($1, $2, 'admin', FALSE, $3)
             "#,
         )
         .bind(&admin_id)
@@ -741,8 +809,27 @@ async fn admin_login(
     )
     .await?;
 
+    let admin = sqlx::query(
+        r#"
+        SELECT login, role FROM admins WHERE admin_id = $1
+        "#,
+    )
+    .bind(&admin_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (admin_login, admin_role) = if let Some(row) = admin {
+        (row.get::<String, _>("login"), row.get::<String, _>("role"))
+    } else {
+        (login.to_string(), "admin".to_string())
+    };
+
     Ok(Json(AdminLoginResponse {
         admin_id,
+        login: admin_login,
+        role: admin_role,
         access_token,
         refresh_token,
     }))
@@ -894,6 +981,27 @@ async fn register_device(
         "device.register",
         "device",
         &device_id,
+    )
+    .await?;
+
+    // Запись начальных данных инвентаризации в историю
+    record_inventory_change(
+        &state.db,
+        &device_id,
+        null_if_empty(&request.host_info.motherboard),
+        null_if_empty(&request.host_info.cpu),
+        if request.host_info.ram_total_mb == 0 {
+            None
+        } else {
+            Some(request.host_info.ram_total_mb as i64)
+        },
+        serialize_string_list(&request.host_info.ip_addresses),
+        serialize_string_list(&request.host_info.mac_addresses),
+        &request.host_info.os,
+        &request.host_info.os_version,
+        &request.host_info.arch,
+        &request.host_info.username,
+        &request.host_info.hostname,
     )
     .await?;
 
@@ -1437,6 +1545,207 @@ async fn list_audit_events(
 
     let events = records.into_iter().map(AuditEventSummary::from).collect();
     Ok(Json(ListAuditEventsResponse { events }))
+}
+
+async fn list_inventory_history(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<InventoryHistoryQuery>,
+) -> Result<Json<ListInventoryHistoryResponse>, ApiError> {
+    let _admin_id = authorize_admin_access_token(&state, &headers).await?;
+    let device_id = query.device_id.as_deref();
+    let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
+
+    let records = if let Some(device_id) = device_id {
+        sqlx::query_as::<_, InventoryRecord>(
+            r#"
+            SELECT
+                record_id,
+                device_id,
+                motherboard,
+                cpu,
+                ram_total_mb,
+                ip_addresses,
+                mac_addresses,
+                os,
+                os_version,
+                arch,
+                username,
+                hostname,
+                recorded_at_ms
+            FROM inventory_history
+            WHERE device_id = $1
+            ORDER BY recorded_at_ms DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(device_id)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, InventoryRecord>(
+            r#"
+            SELECT
+                record_id,
+                device_id,
+                motherboard,
+                cpu,
+                ram_total_mb,
+                ip_addresses,
+                mac_addresses,
+                os,
+                os_version,
+                arch,
+                username,
+                hostname,
+                recorded_at_ms
+            FROM inventory_history
+            ORDER BY recorded_at_ms DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|error| ApiError::internal(format!("failed to list inventory history: {error}")))?;
+
+    let history = records
+        .into_iter()
+        .map(|r| InventoryHistoryRecord {
+            record_id: r.record_id,
+            device_id: r.device_id,
+            motherboard: r.motherboard,
+            cpu: r.cpu,
+            ram_total_mb: r.ram_total_mb,
+            ip_addresses: r.ip_addresses,
+            mac_addresses: r.mac_addresses,
+            os: r.os,
+            os_version: r.os_version,
+            arch: r.arch,
+            username: r.username,
+            hostname: r.hostname,
+            recorded_at_ms: r.recorded_at_ms as u64,
+        })
+        .collect();
+
+    Ok(Json(ListInventoryHistoryResponse { records: history }))
+}
+
+async fn get_device_inventory_history(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+) -> Result<Json<ListInventoryHistoryResponse>, ApiError> {
+    let _admin_id = authorize_admin_access_token(&state, &headers).await?;
+    let limit = 50i64;
+
+    let records = sqlx::query_as::<_, InventoryRecord>(
+        r#"
+        SELECT
+            record_id,
+            device_id,
+            motherboard,
+            cpu,
+            ram_total_mb,
+            ip_addresses,
+            mac_addresses,
+            os,
+            os_version,
+            arch,
+            username,
+            hostname,
+            recorded_at_ms
+        FROM inventory_history
+        WHERE device_id = $1
+        ORDER BY recorded_at_ms DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(&device_id)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| ApiError::internal(format!("failed to get device inventory history: {error}")))?;
+
+    let history = records
+        .into_iter()
+        .map(|r| InventoryHistoryRecord {
+            record_id: r.record_id,
+            device_id: r.device_id,
+            motherboard: r.motherboard,
+            cpu: r.cpu,
+            ram_total_mb: r.ram_total_mb,
+            ip_addresses: r.ip_addresses,
+            mac_addresses: r.mac_addresses,
+            os: r.os,
+            os_version: r.os_version,
+            arch: r.arch,
+            username: r.username,
+            hostname: r.hostname,
+            recorded_at_ms: r.recorded_at_ms as u64,
+        })
+        .collect();
+
+    Ok(Json(ListInventoryHistoryResponse { records: history }))
+}
+
+async fn record_inventory_change(
+    db: &PgPool,
+    device_id: &str,
+    motherboard: Option<&str>,
+    cpu: Option<&str>,
+    ram_total_mb: Option<i64>,
+    ip_addresses: Option<&str>,
+    mac_addresses: Option<&str>,
+    os: &str,
+    os_version: &str,
+    arch: &str,
+    username: &str,
+    hostname: &str,
+) -> Result<(), ApiError> {
+    let record_id = format!("inv_{}", short_id());
+    let recorded_at_ms = now_ms_i64();
+
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_history (
+            record_id,
+            device_id,
+            motherboard,
+            cpu,
+            ram_total_mb,
+            ip_addresses,
+            mac_addresses,
+            os,
+            os_version,
+            arch,
+            username,
+            hostname,
+            recorded_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        "#,
+    )
+    .bind(&record_id)
+    .bind(device_id)
+    .bind(motherboard)
+    .bind(cpu)
+    .bind(ram_total_mb)
+    .bind(ip_addresses)
+    .bind(mac_addresses)
+    .bind(os)
+    .bind(os_version)
+    .bind(arch)
+    .bind(username)
+    .bind(hostname)
+    .bind(recorded_at_ms)
+    .execute(db)
+    .await
+    .map_err(|error| ApiError::internal(format!("failed to record inventory change: {error}")))?;
+
+    Ok(())
 }
 
 async fn handle_signal_socket(state: Arc<AppState>, mut socket: WebSocket, actor: SignalActor) {
@@ -2382,892 +2691,6 @@ fn csv_escape(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-const ADMIN_WEB_APP: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BK-Wiver Admin</title>
-  <style>
-    :root {
-      --bg: #f3f0e8;
-      --panel: #fffdf7;
-      --ink: #1e2a33;
-      --muted: #65727d;
-      --line: #d8cfbf;
-      --accent: #0f766e;
-      --accent-2: #b45309;
-      --danger: #b91c1c;
-      --soft: #ece4d6;
-      --soft-2: #f7efe3;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Avenir Next", "Segoe UI", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, #f8f3e8 0, transparent 36%),
-        linear-gradient(135deg, #efe8db, #f8f5ee 55%, #ece7de);
-    }
-    .shell {
-      max-width: 1480px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-    .hero {
-      display: flex;
-      justify-content: space-between;
-      gap: 20px;
-      align-items: end;
-      margin-bottom: 20px;
-      flex-wrap: wrap;
-    }
-    .hero h1 {
-      margin: 0;
-      font-size: 38px;
-      line-height: 1;
-      letter-spacing: -0.03em;
-    }
-    .hero p {
-      margin: 8px 0 0;
-      color: var(--muted);
-      max-width: 780px;
-    }
-    .panel {
-      background: rgba(255,253,247,0.9);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      box-shadow: 0 20px 50px rgba(31, 41, 55, 0.08);
-      backdrop-filter: blur(10px);
-    }
-    .login, .toolbar, .content { padding: 18px; }
-    .toolbar, .content { margin-top: 18px; }
-    .login-grid, .filters, .token-form {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
-      align-items: end;
-    }
-    label {
-      display: block;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    input, select, button {
-      width: 100%;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      padding: 11px 12px;
-      font: inherit;
-      background: white;
-      color: var(--ink);
-    }
-    button {
-      cursor: pointer;
-      background: var(--ink);
-      color: white;
-      border-color: var(--ink);
-      transition: transform .12s ease, opacity .12s ease;
-    }
-    button.secondary {
-      background: var(--soft);
-      color: var(--ink);
-      border-color: var(--line);
-    }
-    button.warn {
-      background: var(--accent-2);
-      border-color: var(--accent-2);
-    }
-    button.tab {
-      width: auto;
-      background: transparent;
-      color: var(--muted);
-      border-color: var(--line);
-      min-width: 140px;
-    }
-    button.tab.active {
-      background: var(--ink);
-      color: white;
-      border-color: var(--ink);
-    }
-    button:disabled { opacity: .5; cursor: default; }
-    button:hover:not(:disabled) { transform: translateY(-1px); }
-    .toolbar-head, .section-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      margin-bottom: 14px;
-      flex-wrap: wrap;
-    }
-    .tabs {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .status {
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .status.error { color: var(--danger); }
-    .status.ok { color: var(--accent); }
-    .table-wrap { overflow: auto; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 1180px;
-    }
-    th, td {
-      text-align: left;
-      vertical-align: top;
-      padding: 12px 10px;
-      border-bottom: 1px solid #e8ddcc;
-      font-size: 14px;
-    }
-    th {
-      position: sticky;
-      top: 0;
-      background: #fffaf0;
-      z-index: 1;
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px;
-      background: #e5efe9;
-      color: #19634b;
-      white-space: nowrap;
-    }
-    .pill.offline, .pill.blocked, .pill.used {
-      background: #e7e5e4;
-      color: #57534e;
-    }
-    .pill.warn {
-      background: #ffedd5;
-      color: #9a3412;
-    }
-    .card-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
-      margin-top: 14px;
-    }
-    .metric {
-      padding: 14px;
-      border: 1px solid #e8ddcc;
-      border-radius: 16px;
-      background: var(--soft-2);
-    }
-    .metric strong {
-      display: block;
-      font-size: 26px;
-      line-height: 1.1;
-      margin-bottom: 6px;
-    }
-    .muted { color: var(--muted); }
-    .row-actions {
-      display: flex;
-      gap: 8px;
-      min-width: 140px;
-      flex-wrap: wrap;
-    }
-    .row-actions button { padding: 9px 10px; }
-    .page { display: none; }
-    .page.active { display: block; }
-    .hidden { display: none; }
-    .checkbox {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      height: 46px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: white;
-      padding: 0 12px;
-    }
-    .checkbox input {
-      width: auto;
-      margin: 0;
-    }
-    .small {
-      font-size: 12px;
-    }
-    @media (max-width: 900px) {
-      .shell { padding: 16px; }
-      .hero h1 { font-size: 30px; }
-      table { min-width: 900px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <div class="hero">
-      <div>
-        <h1>BK-Wiver Admin</h1>
-        <p>Operational console for inventory, user access, audit history and enrollment tokens. Everything is served directly by the Rust server so Ubuntu deployment stays simple.</p>
-      </div>
-      <div class="status" id="authState">Not signed in</div>
-    </div>
-
-    <section class="panel login" id="loginPanel">
-      <div class="login-grid">
-        <div>
-          <label for="login">Admin Login</label>
-          <input id="login" autocomplete="username" value="admin">
-        </div>
-        <div>
-          <label for="password">Password</label>
-          <input id="password" type="password" autocomplete="current-password" value="admin">
-        </div>
-        <div>
-          <button id="loginBtn">Sign In</button>
-        </div>
-      </div>
-      <div class="status" id="loginStatus"></div>
-    </section>
-
-    <section class="panel toolbar hidden" id="toolbarPanel">
-      <div class="toolbar-head">
-        <div>
-          <strong id="pageTitle">Computers</strong>
-          <div class="status" id="toolbarStatus">Ready</div>
-        </div>
-        <div class="row-actions">
-          <button class="secondary" id="refreshBtn">Refresh</button>
-          <button class="warn" id="exportBtn">Export CSV</button>
-          <button class="secondary" id="logoutBtn">Logout</button>
-        </div>
-      </div>
-      <div class="tabs">
-        <button class="tab active" data-view="computers">Computers</button>
-        <button class="tab" data-view="users">Users</button>
-        <button class="tab" data-view="audit">Audit</button>
-        <button class="tab" data-view="tokens">Tokens</button>
-      </div>
-    </section>
-
-    <section class="panel content hidden" id="contentPanel">
-      <div class="page active" id="page-computers">
-        <div class="filters">
-          <div>
-            <label for="search">Search</label>
-            <input id="search" placeholder="Hostname, user, CPU, group">
-          </div>
-          <div>
-            <label for="groupFilter">Group</label>
-            <select id="groupFilter"><option value="">All groups</option></select>
-          </div>
-          <div>
-            <label for="departmentFilter">Department</label>
-            <select id="departmentFilter"><option value="">All departments</option></select>
-          </div>
-          <div>
-            <label for="locationFilter">Location</label>
-            <select id="locationFilter"><option value="">All locations</option></select>
-          </div>
-          <div>
-            <label for="onlineFilter">Status</label>
-            <select id="onlineFilter">
-              <option value="">All</option>
-              <option value="online">Online</option>
-              <option value="offline">Offline</option>
-            </select>
-          </div>
-        </div>
-        <div class="card-grid">
-          <div class="metric"><strong id="metricDevices">0</strong><span class="muted">Devices</span></div>
-          <div class="metric"><strong id="metricOnline">0</strong><span class="muted">Online now</span></div>
-          <div class="metric"><strong id="metricGroups">0</strong><span class="muted">Groups</span></div>
-          <div class="metric"><strong id="metricLocations">0</strong><span class="muted">Locations</span></div>
-        </div>
-        <div class="table-wrap" style="margin-top:14px;">
-          <table>
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Computer</th>
-                <th>Group</th>
-                <th>Department</th>
-                <th>Location</th>
-                <th>Hardware</th>
-                <th>Network</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="deviceTable"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="page" id="page-users">
-        <div class="section-head">
-          <div>
-            <strong id="userCount">0 users</strong>
-            <div class="muted small">Role management and blocking for desktop operators.</div>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Login</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Desktop Version</th>
-                <th>Last Login</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="userTable"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="page" id="page-audit">
-        <div class="section-head">
-          <div>
-            <strong id="auditCount">0 events</strong>
-            <div class="muted small">Recent administrative and operational changes.</div>
-          </div>
-          <div style="min-width:180px;">
-            <label for="auditLimit">Audit Depth</label>
-            <select id="auditLimit">
-              <option value="100">100 events</option>
-              <option value="250">250 events</option>
-              <option value="500">500 events</option>
-            </select>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Actor</th>
-                <th>Action</th>
-                <th>Target</th>
-                <th>Event ID</th>
-              </tr>
-            </thead>
-            <tbody id="auditTable"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="page" id="page-tokens">
-        <div class="section-head">
-          <div>
-            <strong id="tokenCount">0 tokens</strong>
-            <div class="muted small">Enrollment tokens for host installation and provisioning.</div>
-          </div>
-        </div>
-        <div class="token-form" style="margin-bottom:16px;">
-          <div>
-            <label for="tokenComment">Comment</label>
-            <input id="tokenComment" placeholder="Moscow office / QA / batch 03">
-          </div>
-          <div>
-            <label for="tokenExpiresDays">Expires In</label>
-            <select id="tokenExpiresDays">
-              <option value="1">1 day</option>
-              <option value="7" selected>7 days</option>
-              <option value="30">30 days</option>
-              <option value="90">90 days</option>
-            </select>
-          </div>
-          <div>
-            <label>&nbsp;</label>
-            <div class="checkbox">
-              <input id="tokenSingleUse" type="checkbox" checked>
-              <span>Single-use token</span>
-            </div>
-          </div>
-          <div>
-            <button id="createTokenBtn">Create Token</button>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>Comment</th>
-                <th>Token</th>
-                <th>Created By</th>
-                <th>Created</th>
-                <th>Expires</th>
-                <th>Used</th>
-              </tr>
-            </thead>
-            <tbody id="tokenTable"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  </div>
-
-  <script>
-    const state = {
-      token: "",
-      activeView: "computers",
-      devices: [],
-      users: [],
-      events: [],
-      tokens: []
-    };
-    const ids = (id) => document.getElementById(id);
-
-    function setStatus(target, message, kind = "") {
-      target.textContent = message;
-      target.className = "status" + (kind ? " " + kind : "");
-    }
-
-    function pageTitle(view) {
-      return {
-        computers: "Computers",
-        users: "Users",
-        audit: "Audit",
-        tokens: "Tokens"
-      }[view] || "Admin";
-    }
-
-    function setView(view) {
-      state.activeView = view;
-      ids("pageTitle").textContent = pageTitle(view);
-      document.querySelectorAll(".tab").forEach((button) => {
-        button.classList.toggle("active", button.dataset.view === view);
-      });
-      document.querySelectorAll(".page").forEach((page) => {
-        page.classList.toggle("active", page.id === `page-${view}`);
-      });
-      ids("exportBtn").classList.toggle("hidden", view !== "computers");
-    }
-
-    async function apiFetch(url, options = {}) {
-      const headers = { ...(options.headers || {}) };
-      if (state.token) {
-        headers.Authorization = "Bearer " + state.token;
-      }
-      const response = await fetch(url, { ...options, headers });
-      if (response.status === 401 || response.status === 403) {
-        logout(true);
-        throw new Error("Admin session expired");
-      }
-      return response;
-    }
-
-    async function login() {
-      const login = ids("login").value.trim();
-      const password = ids("password").value;
-      setStatus(ids("loginStatus"), "Signing in...");
-      const response = await fetch("/api/v1/admin/auth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ login, password })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error?.message || "Sign-in failed");
-      }
-      state.token = payload.accessToken;
-      localStorage.setItem("bk_admin_token", state.token);
-      ids("loginPanel").classList.add("hidden");
-      ids("toolbarPanel").classList.remove("hidden");
-      ids("contentPanel").classList.remove("hidden");
-      setStatus(ids("authState"), "Admin session active", "ok");
-      await refreshAll();
-    }
-
-    function logout(expired = false) {
-      localStorage.removeItem("bk_admin_token");
-      state.token = "";
-      ids("loginPanel").classList.remove("hidden");
-      ids("toolbarPanel").classList.add("hidden");
-      ids("contentPanel").classList.add("hidden");
-      setStatus(ids("authState"), expired ? "Session expired" : "Not signed in", expired ? "error" : "");
-    }
-
-    async function refreshAll() {
-      setStatus(ids("toolbarStatus"), "Refreshing data...");
-      await Promise.all([
-        refreshDevices(false),
-        refreshUsers(false),
-        refreshAudit(false),
-        refreshTokens(false)
-      ]);
-      setStatus(ids("toolbarStatus"), "All admin views are up to date", "ok");
-    }
-
-    async function refreshDevices(updateStatus = true) {
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading devices...");
-      const response = await apiFetch("/api/v1/admin/devices");
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error?.message || "Failed to load devices");
-      }
-      state.devices = payload.devices || [];
-      hydrateDeviceFilters();
-      renderDevices();
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Devices loaded", "ok");
-    }
-
-    async function refreshUsers(updateStatus = true) {
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading users...");
-      const response = await apiFetch("/api/v1/admin/users");
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error?.message || "Failed to load users");
-      }
-      state.users = payload.users || [];
-      renderUsers();
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Users loaded", "ok");
-    }
-
-    async function refreshAudit(updateStatus = true) {
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading audit...");
-      const limit = ids("auditLimit").value || "100";
-      const response = await apiFetch(`/api/v1/admin/audit?limit=${encodeURIComponent(limit)}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error?.message || "Failed to load audit");
-      }
-      state.events = payload.events || [];
-      renderAudit();
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Audit loaded", "ok");
-    }
-
-    async function refreshTokens(updateStatus = true) {
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Loading tokens...");
-      const response = await apiFetch("/api/v1/admin/enrollment-tokens");
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error?.message || "Failed to load enrollment tokens");
-      }
-      state.tokens = payload.enrollmentTokens || [];
-      renderTokens();
-      if (updateStatus) setStatus(ids("toolbarStatus"), "Tokens loaded", "ok");
-    }
-
-    function hydrateDeviceFilters() {
-      fillSelect("groupFilter", uniqueValues(state.devices.map(item => item.groupName)));
-      fillSelect("departmentFilter", uniqueValues(state.devices.map(item => item.department)));
-      fillSelect("locationFilter", uniqueValues(state.devices.map(item => item.location)));
-    }
-
-    function fillSelect(id, values) {
-      const select = ids(id);
-      const current = select.value;
-      const first = select.options[0].outerHTML;
-      select.innerHTML = first + values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
-      select.value = values.includes(current) ? current : "";
-    }
-
-    function uniqueValues(values) {
-      return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    }
-
-    function filteredDevices() {
-      const search = ids("search").value.trim().toLowerCase();
-      const group = ids("groupFilter").value;
-      const department = ids("departmentFilter").value;
-      const location = ids("locationFilter").value;
-      const online = ids("onlineFilter").value;
-      return state.devices.filter((device) => {
-        if (group && device.groupName !== group) return false;
-        if (department && device.department !== department) return false;
-        if (location && device.location !== location) return false;
-        if (online === "online" && !device.online) return false;
-        if (online === "offline" && device.online) return false;
-        if (!search) return true;
-        const haystack = [
-          device.deviceId,
-          device.deviceName,
-          device.groupName,
-          device.department,
-          device.location,
-          device.hostInfo?.hostname,
-          device.hostInfo?.username,
-          device.hostInfo?.cpu,
-          device.hostInfo?.motherboard
-        ].join(" ").toLowerCase();
-        return haystack.includes(search);
-      });
-    }
-
-    function renderDevices() {
-      const devices = filteredDevices();
-      ids("metricDevices").textContent = String(state.devices.length);
-      ids("metricOnline").textContent = String(state.devices.filter(device => device.online).length);
-      ids("metricGroups").textContent = String(uniqueValues(state.devices.map(device => device.groupName)).length);
-      ids("metricLocations").textContent = String(uniqueValues(state.devices.map(device => device.location)).length);
-      ids("deviceTable").innerHTML = devices.map((device) => deviceRowHtml(device)).join("");
-    }
-
-    function deviceRowHtml(device) {
-      const statusClass = device.online ? "" : " offline";
-      const host = device.hostInfo || {};
-      return `
-        <tr>
-          <td><span class="pill${statusClass}">${device.online ? "Online" : "Offline"}</span></td>
-          <td>
-            <strong>${escapeHtml(device.deviceName)}</strong><br>
-            <span class="muted">${escapeHtml(host.hostname || "")}</span><br>
-            <span class="muted">${escapeHtml(host.username || "")}</span>
-          </td>
-          <td><input data-field="groupName" data-id="${escapeHtml(device.deviceId)}" value="${escapeHtml(device.groupName || "")}"></td>
-          <td><input data-field="department" data-id="${escapeHtml(device.deviceId)}" value="${escapeHtml(device.department || "")}"></td>
-          <td><input data-field="location" data-id="${escapeHtml(device.deviceId)}" value="${escapeHtml(device.location || "")}"></td>
-          <td>
-            <strong>${escapeHtml(host.cpu || "")}</strong><br>
-            <span class="muted">${escapeHtml(host.motherboard || "")}</span><br>
-            <span class="muted">RAM: ${escapeHtml(String(host.ramTotalMb || 0))} MB</span>
-          </td>
-          <td>
-            <span class="muted">${escapeHtml((host.ipAddresses || []).join(", "))}</span><br>
-            <span class="muted">${escapeHtml((host.macAddresses || []).join(", "))}</span>
-          </td>
-          <td>
-            <div class="row-actions">
-              <button class="secondary" onclick="saveDevice('${escapeJs(device.deviceId)}')">Save</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    }
-
-    function renderUsers() {
-      ids("userCount").textContent = `${state.users.length} users`;
-      ids("userTable").innerHTML = state.users.map((user) => `
-        <tr>
-          <td>
-            <strong>${escapeHtml(user.login)}</strong><br>
-            <span class="muted">${escapeHtml(user.userId)}</span>
-          </td>
-          <td>
-            <select data-user-role="${escapeHtml(user.userId)}">
-              <option value="operator" ${user.role === "operator" ? "selected" : ""}>operator</option>
-              <option value="viewer" ${user.role === "viewer" ? "selected" : ""}>viewer</option>
-            </select>
-          </td>
-          <td><span class="pill${user.blocked ? " blocked" : ""}">${user.blocked ? "Blocked" : "Active"}</span></td>
-          <td>
-            <strong>${escapeHtml(user.desktopVersion?.version || "")}</strong><br>
-            <span class="muted">${escapeHtml(user.desktopVersion?.commit || "")}</span>
-          </td>
-          <td>${escapeHtml(formatDate(user.lastLoginAtMs))}</td>
-          <td>
-            <div class="row-actions">
-              <button class="secondary" onclick="saveUser('${escapeJs(user.userId)}')">Save</button>
-              <button class="warn" onclick="toggleUserBlock('${escapeJs(user.userId)}', ${user.blocked ? "false" : "true"})">${user.blocked ? "Unblock" : "Block"}</button>
-            </div>
-          </td>
-        </tr>
-      `).join("");
-    }
-
-    function renderAudit() {
-      ids("auditCount").textContent = `${state.events.length} events`;
-      ids("auditTable").innerHTML = state.events.map((event) => `
-        <tr>
-          <td>${escapeHtml(formatDate(event.createdAtMs))}</td>
-          <td>
-            <strong>${escapeHtml(event.actorType)}</strong><br>
-            <span class="muted">${escapeHtml(event.actorId)}</span>
-          </td>
-          <td>${escapeHtml(event.action)}</td>
-          <td>
-            <strong>${escapeHtml(event.targetType)}</strong><br>
-            <span class="muted">${escapeHtml(event.targetId)}</span>
-          </td>
-          <td><span class="muted">${escapeHtml(event.eventId)}</span></td>
-        </tr>
-      `).join("");
-    }
-
-    function renderTokens() {
-      ids("tokenCount").textContent = `${state.tokens.length} tokens`;
-      ids("tokenTable").innerHTML = state.tokens.map((token) => {
-        const status = token.usedAtMs ? "Used" : (token.expiresAtMs < Date.now() ? "Expired" : "Active");
-        const statusClass = token.usedAtMs ? " used" : (token.expiresAtMs < Date.now() ? " warn" : "");
-        return `
-          <tr>
-            <td><span class="pill${statusClass}">${escapeHtml(status)}</span></td>
-            <td>
-              <strong>${escapeHtml(token.comment)}</strong><br>
-              <span class="muted">${token.singleUse ? "single-use" : "multi-use"}</span>
-            </td>
-            <td><span class="muted">${escapeHtml(token.token)}</span></td>
-            <td>${escapeHtml(token.createdByUserId)}</td>
-            <td>${escapeHtml(formatDate(token.createdAtMs))}</td>
-            <td>${escapeHtml(formatDate(token.expiresAtMs))}</td>
-            <td>${escapeHtml(token.usedAtMs ? formatDate(token.usedAtMs) : "Not used")}</td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function saveDevice(deviceId) {
-      const payload = {};
-      document.querySelectorAll(`[data-id="${CSS.escape(deviceId)}"]`).forEach((input) => {
-        payload[input.dataset.field] = input.value.trim() || null;
-      });
-      const response = await apiFetch(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to save device", "error");
-        return;
-      }
-      setStatus(ids("toolbarStatus"), `Saved device ${deviceId}`, "ok");
-      await refreshDevices(false);
-    }
-
-    async function saveUser(userId) {
-      const role = document.querySelector(`[data-user-role="${CSS.escape(userId)}"]`)?.value || "operator";
-      const response = await apiFetch(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role })
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to save user", "error");
-        return;
-      }
-      setStatus(ids("toolbarStatus"), `Updated user ${userId}`, "ok");
-      await refreshUsers(false);
-      await refreshAudit(false);
-    }
-
-    async function toggleUserBlock(userId, blocked) {
-      const response = await apiFetch(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ blocked })
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setStatus(ids("toolbarStatus"), body?.error?.message || "Failed to update user status", "error");
-        return;
-      }
-      setStatus(ids("toolbarStatus"), `Updated user state for ${userId}`, "ok");
-      await refreshUsers(false);
-      await refreshAudit(false);
-    }
-
-    async function createToken() {
-      const comment = ids("tokenComment").value.trim();
-      const days = Number(ids("tokenExpiresDays").value || "7");
-      const singleUse = ids("tokenSingleUse").checked;
-      if (!comment) {
-        throw new Error("Comment is required for the enrollment token");
-      }
-      const expiresAtMs = Date.now() + days * 24 * 60 * 60 * 1000;
-      const response = await apiFetch("/api/v1/admin/enrollment-tokens", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ comment, expiresAtMs, singleUse })
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(body?.error?.message || "Failed to create enrollment token");
-      }
-      ids("tokenComment").value = "";
-      setStatus(ids("toolbarStatus"), `Created token ${body?.enrollmentToken?.tokenId || ""}`, "ok");
-      await refreshTokens(false);
-      await refreshAudit(false);
-    }
-
-    async function exportCsv() {
-      const response = await apiFetch("/api/v1/admin/devices/export.csv");
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "Failed to export CSV");
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "bk-wiver-devices.csv";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-    }
-
-    function formatDate(value) {
-      if (!value) return "Never";
-      const date = new Date(Number(value));
-      if (Number.isNaN(date.getTime())) return String(value);
-      return date.toLocaleString();
-    }
-
-    function escapeHtml(value) {
-      return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-    }
-
-    function escapeJs(value) {
-      return String(value ?? "").replaceAll("\\", "\\\\").replaceAll("'", "\\'");
-    }
-
-    ids("loginBtn").addEventListener("click", async () => {
-      try { await login(); } catch (error) { setStatus(ids("loginStatus"), error.message || String(error), "error"); }
-    });
-    ids("refreshBtn").addEventListener("click", async () => {
-      try { await refreshAll(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
-    });
-    ids("exportBtn").addEventListener("click", async () => {
-      try { await exportCsv(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
-    });
-    ids("logoutBtn").addEventListener("click", () => logout(false));
-    ids("createTokenBtn").addEventListener("click", async () => {
-      try { await createToken(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
-    });
-    ids("auditLimit").addEventListener("change", async () => {
-      try { await refreshAudit(); } catch (error) { setStatus(ids("toolbarStatus"), error.message || String(error), "error"); }
-    });
-    ["search", "groupFilter", "departmentFilter", "locationFilter", "onlineFilter"].forEach((id) => {
-      ids(id).addEventListener("input", renderDevices);
-      ids(id).addEventListener("change", renderDevices);
-    });
-    document.querySelectorAll(".tab").forEach((button) => {
-      button.addEventListener("click", () => setView(button.dataset.view));
-    });
-
-    (async function boot() {
-      const token = localStorage.getItem("bk_admin_token");
-      setView("computers");
-      if (!token) return;
-      state.token = token;
-      ids("loginPanel").classList.add("hidden");
-      ids("toolbarPanel").classList.remove("hidden");
-      ids("contentPanel").classList.remove("hidden");
-      setStatus(ids("authState"), "Admin session restored", "ok");
-      try {
-        await refreshAll();
-      } catch (error) {
-        logout(true);
-        setStatus(ids("loginStatus"), error.message || String(error), "error");
-      }
-    })();
-  </script>
-</body>
-</html>
-"#;
 
 impl From<UserRecord> for UserSummary {
     fn from(value: UserRecord) -> Self {
@@ -3322,6 +2745,7 @@ async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS admins (
             admin_id TEXT PRIMARY KEY,
             login TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL DEFAULT 'admin',
             blocked BOOLEAN NOT NULL DEFAULT FALSE,
             last_login_at_ms BIGINT NOT NULL
         );
@@ -3329,6 +2753,10 @@ async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
     )
     .execute(db)
     .await?;
+
+    sqlx::query("ALTER TABLE admins ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin';")
+        .execute(db)
+        .await?;
 
     sqlx::query(
         r#"
@@ -3508,6 +2936,28 @@ async fn run_migrations(db: &PgPool) -> anyhow::Result<()> {
             target_type TEXT NOT NULL,
             target_id TEXT NOT NULL,
             created_at_ms BIGINT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS inventory_history (
+            record_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+            motherboard TEXT NULL,
+            cpu TEXT NULL,
+            ram_total_mb BIGINT NULL,
+            ip_addresses TEXT NULL,
+            mac_addresses TEXT NULL,
+            os TEXT NOT NULL,
+            os_version TEXT NOT NULL,
+            arch TEXT NOT NULL,
+            username TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            recorded_at_ms BIGINT NOT NULL
         );
         "#,
     )

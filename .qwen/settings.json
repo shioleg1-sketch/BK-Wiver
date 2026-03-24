@@ -26,7 +26,9 @@
       "Bash(ssh *)",
       "Bash(git clone *)",
       "Bash(git *)",
-      "Bash(git ls-remote *)"
+      "Bash(git ls-remote *)",
+      "Bash(sed *)",
+      "Bash(cargo check *)"
     ]
   },
   "$version": 3
