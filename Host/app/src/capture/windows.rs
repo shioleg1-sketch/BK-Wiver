@@ -38,6 +38,7 @@ pub struct WindowsCaptureEngine {
     gdi_backend: Option<GdiCaptureBackend>,
     screenshots_fallback: ScreenshotsCaptureBackend,
     last_successful_frame: Option<RgbaImage>,
+    last_successful_frame_index: u32,
 }
 
 impl WindowsCaptureEngine {
@@ -89,6 +90,7 @@ impl WindowsCaptureEngine {
                 "windows-screenshots-fallback",
             ),
             last_successful_frame: None,
+            last_successful_frame_index: 0,
         }
     }
 
@@ -102,8 +104,8 @@ impl WindowsCaptureEngine {
         match self.preferred_backend {
             WindowsCaptureBackendKind::DxgiDuplication => {
                 if let Some(backend) = &mut self.dxgi_backend {
-                    match backend.capture(max_dimensions) {
-                        Ok(image) => self.capture_frame(image, "windows-dxgi", false),
+                    match backend.capture(max_dimensions, frame_index) {
+                        Ok(image) => self.capture_frame(image, "windows-dxgi", false, frame_index),
                         Err(error) => {
                             logging::append_log(
                                 "WARN",
@@ -114,7 +116,12 @@ impl WindowsCaptureEngine {
                             if should_retry_dxgi(&error) {
                                 match self.capture_with_gdi(max_dimensions) {
                                     Ok(image) => {
-                                        self.capture_frame(image, "windows-gdi-temporary", false)
+                                        self.capture_frame(
+                                            image,
+                                            "windows-gdi-temporary",
+                                            false,
+                                            frame_index,
+                                        )
                                     }
                                     Err(gdi_error) => {
                                         logging::append_log(
@@ -160,7 +167,7 @@ impl WindowsCaptureEngine {
                         } else {
                             "windows-gdi"
                         };
-                        self.capture_frame(image, backend_name, false)
+                        self.capture_frame(image, backend_name, false, frame_index)
                     }
                     Err(error) => {
                         logging::append_log(
@@ -199,9 +206,12 @@ impl WindowsCaptureEngine {
         frame_index: u32,
     ) -> CaptureFrame {
         match self.screenshots_fallback.try_capture(max_dimensions) {
-            Ok(image) => {
-                self.capture_frame(image, self.screenshots_fallback.backend_name(), false)
-            }
+            Ok(image) => self.capture_frame(
+                image,
+                self.screenshots_fallback.backend_name(),
+                false,
+                frame_index,
+            ),
             Err(error) => {
                 logging::append_log(
                     "WARN",
@@ -229,8 +239,14 @@ impl WindowsCaptureEngine {
         image: RgbaImage,
         backend: &'static str,
         used_fallback: bool,
+        frame_index: u32,
     ) -> CaptureFrame {
-        self.last_successful_frame = Some(image.clone());
+        if self.last_successful_frame.is_none()
+            || frame_index.wrapping_sub(self.last_successful_frame_index) >= 30
+        {
+            self.last_successful_frame = Some(image.clone());
+            self.last_successful_frame_index = frame_index;
+        }
         CaptureFrame {
             image,
             backend,
@@ -285,6 +301,7 @@ impl WindowsCaptureEngine {
 struct DxgiCaptureBackend {
     manager: DXGIManager,
     last_frame: Option<RgbaImage>,
+    last_frame_index: u32,
 }
 
 impl DxgiCaptureBackend {
@@ -294,10 +311,11 @@ impl DxgiCaptureBackend {
         Ok(Self {
             manager,
             last_frame: None,
+            last_frame_index: 0,
         })
     }
 
-    fn capture(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
+    fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> Result<RgbaImage, String> {
         match self.manager.capture_frame_components() {
             Ok((mut bgra, (width, height))) => {
                 for pixel in bgra.chunks_exact_mut(4) {
@@ -307,7 +325,12 @@ impl DxgiCaptureBackend {
                 let image = ImageBuffer::from_raw(width as u32, height as u32, bgra)
                     .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
                 let image = fit_frame(image, max_dimensions);
-                self.last_frame = Some(image.clone());
+                if self.last_frame.is_none()
+                    || frame_index.wrapping_sub(self.last_frame_index) >= 30
+                {
+                    self.last_frame = Some(image.clone());
+                    self.last_frame_index = frame_index;
+                }
                 Ok(image)
             }
             Err(CaptureError::Timeout) => self
