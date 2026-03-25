@@ -123,6 +123,7 @@ enum StreamQualityProfile {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StreamCodecPreference {
+    Auto,
     H264,
     Vp8,
 }
@@ -130,6 +131,7 @@ enum StreamCodecPreference {
 impl StreamCodecPreference {
     fn wire_name(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::H264 => "h264",
             Self::Vp8 => "vp8",
         }
@@ -137,6 +139,7 @@ impl StreamCodecPreference {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Auto => "Auto",
             Self::H264 => "H.264",
             Self::Vp8 => "VP8",
         }
@@ -144,7 +147,7 @@ impl StreamCodecPreference {
 }
 
 fn default_stream_codec_preference() -> StreamCodecPreference {
-    StreamCodecPreference::H264
+    StreamCodecPreference::Auto
 }
 
 impl StreamQualityProfile {
@@ -1534,6 +1537,11 @@ impl ConsoleApp {
                             egui::ComboBox::from_id_salt("session_codec_preference")
                                 .selected_text(self.stream_codec_preference.label())
                                 .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.stream_codec_preference,
+                                        StreamCodecPreference::Auto,
+                                        StreamCodecPreference::Auto.label(),
+                                    );
                                     ui.selectable_value(
                                         &mut self.stream_codec_preference,
                                         StreamCodecPreference::H264,

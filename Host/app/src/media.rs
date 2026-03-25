@@ -16,7 +16,7 @@ use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
 
-use crossbeam_channel::{bounded, TrySendError};
+use crossbeam_channel::{Receiver as CrossbeamReceiver, bounded, TrySendError};
 
 use crate::{capture::CaptureEngine, logging};
 
@@ -57,6 +57,14 @@ impl StreamCodec {
             Self::Vp8 => 1,
         }
     }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::H264 => "h264",
+            Self::Vp8 => "vp8",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +85,13 @@ impl HardwareEncoder {
             Self::VideoToolbox => "h264_videotoolbox",
             Self::Libx264 => "libx264",
         }
+    }
+}
+
+fn resolve_auto_codec(best_h264_encoder: HardwareEncoder) -> StreamCodec {
+    match best_h264_encoder {
+        HardwareEncoder::Libx264 => StreamCodec::Vp8,
+        _ => StreamCodec::H264,
     }
 }
 
@@ -598,13 +613,18 @@ pub fn spawn_stream(
             return;
         };
 
-        let (frame_tx, frame_rx) = bounded::<RawFrame>(2);
+        let (frame_tx, frame_rx): (
+            crossbeam_channel::Sender<RawFrame>,
+            CrossbeamReceiver<RawFrame>,
+        ) = bounded(2);
+        let frame_drop_rx = frame_rx.clone();
         let stop_capture = stop_flag.clone();
         let capture_profile = profile.clone();
 
         let capture_handle = thread::spawn(move || {
             let mut frame_index = 0u32;
             let mut capture_engine = CaptureEngine::new();
+            let mut dropped_stale_frames = 0u64;
 
             while !stop_capture.load(Ordering::Relaxed) {
                 let stream_profile = capture_profile
@@ -631,7 +651,22 @@ pub fn spawn_stream(
 
                 match frame_tx.try_send(frame) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Full(frame)) => {
+                        let _ = frame_drop_rx.try_recv();
+                        if frame_tx.try_send(frame).is_ok() {
+                            dropped_stale_frames = dropped_stale_frames.saturating_add(1);
+                            if dropped_stale_frames == 1 || dropped_stale_frames % 120 == 0 {
+                                logging::append_log(
+                                    "INFO",
+                                    "media.capture",
+                                    format!(
+                                        "dropped_stale_frames={} strategy=latest_frame_wins",
+                                        dropped_stale_frames
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     Err(TrySendError::Disconnected(_)) => break,
                 }
 
@@ -657,6 +692,9 @@ pub fn spawn_stream(
                         let mut vp8_chunks_sent = 0u64;
                         let mut h264_packets_sent = 0u64;
                         let mut sent_frames = 0u64;
+                        let mut active_codec: Option<StreamCodec> = None;
+                        let mut auto_codec_override: Option<StreamCodec> = None;
+                        let mut auto_retry_h264_after: Option<Instant> = None;
 
                         logging::append_log(
                             "INFO",
@@ -682,22 +720,103 @@ pub fn spawn_stream(
                                 .lock()
                                 .map(|guard| *guard)
                                 .unwrap_or(StreamCodec::Auto);
+                            if preferred_codec != StreamCodec::Auto {
+                                auto_codec_override = None;
+                                auto_retry_h264_after = None;
+                            }
+
+                            let selected_codec = match preferred_codec {
+                                StreamCodec::Auto => {
+                                    if auto_codec_override == Some(StreamCodec::Vp8)
+                                        && auto_retry_h264_after
+                                            .map(|deadline| Instant::now() < deadline)
+                                            .unwrap_or(false)
+                                    {
+                                        StreamCodec::Vp8
+                                    } else {
+                                        if auto_codec_override.is_some() {
+                                            logging::append_log(
+                                                "INFO",
+                                                "media.codec_auto",
+                                                format!(
+                                                    "session_id={} retrying codec=h264 after cooldown",
+                                                    session_id
+                                                ),
+                                            );
+                                        }
+                                        auto_codec_override = None;
+                                        resolve_auto_codec(best_encoder)
+                                    }
+                                }
+                                other => other,
+                            };
+
+                            if active_codec != Some(selected_codec) {
+                                logging::append_log(
+                                    "INFO",
+                                    "media.codec_switch",
+                                    format!(
+                                        "session_id={} requested={} active={}",
+                                        session_id,
+                                        preferred_codec.wire_name(),
+                                        selected_codec.wire_name()
+                                    ),
+                                );
+                                match selected_codec {
+                                    StreamCodec::H264 => {
+                                        vp8_encoder = None;
+                                        vp8_config_sent = false;
+                                        vp8_header_buffer.clear();
+                                    }
+                                    StreamCodec::Vp8 => {
+                                        h264_encoder = None;
+                                        h264_config_sent = false;
+                                    }
+                                    StreamCodec::Auto => {}
+                                }
+                                active_codec = Some(selected_codec);
+                            }
 
                             let encode_started = Instant::now();
 
-                            match preferred_codec {
-                                StreamCodec::H264 | StreamCodec::Auto => {
+                            match selected_codec {
+                                StreamCodec::H264 => {
                                     let mut sent_packets_this_frame = 0u64;
-                                    if ensure_h264_encoder_hw(
+                                    if let Err(error) = ensure_h264_encoder_hw(
                                         &mut h264_encoder,
                                         frame.width,
                                         frame.height,
                                         stream_profile,
                                         best_encoder,
                                         input_pix_fmt,
-                                    )
-                                    .is_ok()
-                                    {
+                                    ) {
+                                        logging::append_log(
+                                            "WARN",
+                                            "media.h264_encoder",
+                                            format!("failed to start encoder: {}", error),
+                                        );
+                                        h264_encoder = None;
+                                        h264_config_sent = false;
+                                        if preferred_codec == StreamCodec::Auto {
+                                            let fallback = resolve_auto_codec(best_encoder);
+                                            if fallback != StreamCodec::H264 {
+                                                auto_codec_override = Some(fallback);
+                                                auto_retry_h264_after =
+                                                    Some(Instant::now() + Duration::from_secs(10));
+                                                active_codec = None;
+                                                logging::append_log(
+                                                    "WARN",
+                                                    "media.codec_auto",
+                                                    format!(
+                                                        "session_id={} fallback={} reason=h264_start_failed",
+                                                        session_id,
+                                                        fallback.wire_name()
+                                                    ),
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    } else {
                                         if let Some(encoder) = &mut h264_encoder {
                                             if encoder.push_raw(&frame.data).is_ok() {
                                                 let packets = encoder.drain_packets();
@@ -773,16 +892,28 @@ pub fn spawn_stream(
                                                 );
                                                 h264_encoder = None;
                                                 h264_config_sent = false;
+                                                if preferred_codec == StreamCodec::Auto {
+                                                    let fallback = resolve_auto_codec(best_encoder);
+                                                    if fallback != StreamCodec::H264 {
+                                                        auto_codec_override = Some(fallback);
+                                                        auto_retry_h264_after = Some(
+                                                            Instant::now() + Duration::from_secs(10),
+                                                        );
+                                                        active_codec = None;
+                                                        logging::append_log(
+                                                            "WARN",
+                                                            "media.codec_auto",
+                                                            format!(
+                                                                "session_id={} fallback={} reason=h264_stdin_failed",
+                                                                session_id,
+                                                                fallback.wire_name()
+                                                            ),
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
                                             }
                                         }
-                                    } else {
-                                        logging::append_log(
-                                            "WARN",
-                                            "media.h264_encoder",
-                                            "failed to start encoder",
-                                        );
-                                        h264_encoder = None;
-                                        h264_config_sent = false;
                                     }
 
                                     let encode_ms = encode_started.elapsed().as_millis();
@@ -906,6 +1037,20 @@ pub fn spawn_stream(
                                             vp8_encoder = None;
                                             vp8_config_sent = false;
                                             vp8_header_buffer.clear();
+                                            if preferred_codec == StreamCodec::Auto {
+                                                auto_codec_override = Some(StreamCodec::H264);
+                                                auto_retry_h264_after = None;
+                                                active_codec = None;
+                                                logging::append_log(
+                                                    "WARN",
+                                                    "media.codec_auto",
+                                                    format!(
+                                                        "session_id={} fallback=h264 reason=vp8_start_failed",
+                                                        session_id
+                                                    ),
+                                                );
+                                                continue;
+                                            }
                                         }
                                     }
 
@@ -926,6 +1071,7 @@ pub fn spawn_stream(
                                         );
                                     }
                                 }
+                                StreamCodec::Auto => {}
                             }
                         }
 
