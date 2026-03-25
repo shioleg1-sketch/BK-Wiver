@@ -282,6 +282,7 @@ struct HostApp {
     last_auto_connect_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     media_sessions: BTreeMap<String, HostMediaSession>,
+    input_controller: Option<Enigo>,
     command_rx: Receiver<HostUiCommand>,
     signal_rx: Receiver<SignalEvent>,
     signal_tx: Sender<SignalEvent>,
@@ -312,6 +313,7 @@ impl HostApp {
             last_auto_connect_attempt_at_ms: 0,
             signal_listener_key: None,
             media_sessions: BTreeMap::new(),
+            input_controller: None,
             command_rx,
             signal_rx,
             signal_tx,
@@ -679,9 +681,11 @@ impl HostApp {
                         scroll_y,
                     ) {
                         Ok(()) => {
-                            self.status_line = format!(
-                                "Выполнена команда мыши для сеанса {session_id}."
-                            );
+                            if action != "move" {
+                                self.status_line = format!(
+                                    "Выполнена команда мыши для сеанса {session_id}."
+                                );
+                            }
                         }
                         Err(error) => {
                             self.status_line = format!(
@@ -728,8 +732,19 @@ impl HostApp {
         }
     }
 
+    fn ensure_input_controller(&mut self) -> Result<&mut Enigo, String> {
+        if self.input_controller.is_none() {
+            self.input_controller =
+                Some(Enigo::new(&Settings::default()).map_err(|error| error.to_string())?);
+        }
+
+        self.input_controller
+            .as_mut()
+            .ok_or_else(|| "не удалось инициализировать управление вводом".to_owned())
+    }
+
     fn apply_mouse_input(
-        &self,
+        &mut self,
         x_norm: f32,
         y_norm: f32,
         button: &str,
@@ -744,7 +759,7 @@ impl HostApp {
         let x = info.x + (x_norm.clamp(0.0, 1.0) * width).round() as i32;
         let y = info.y + (y_norm.clamp(0.0, 1.0) * height).round() as i32;
 
-        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
+        let enigo = self.ensure_input_controller()?;
         enigo
             .move_mouse(x, y, Coordinate::Abs)
             .map_err(|error| error.to_string())?;
@@ -786,13 +801,13 @@ impl HostApp {
     }
 
     fn apply_key_input(
-        &self,
+        &mut self,
         kind: &str,
         key: &str,
         text: &str,
         modifiers: &[String],
     ) -> Result<(), String> {
-        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
+        let enigo = self.ensure_input_controller()?;
         match kind {
             "text" => {
                 if !text.is_empty() {
@@ -805,9 +820,9 @@ impl HostApp {
                 };
 
                 let modifier_keys = modifier_keys(modifiers);
-                press_modifier_keys(&mut enigo, &modifier_keys)?;
+                press_modifier_keys(enigo, &modifier_keys)?;
                 let key_result = enigo.key(key, Direction::Click);
-                let release_result = release_modifier_keys(&mut enigo, &modifier_keys);
+                let release_result = release_modifier_keys(enigo, &modifier_keys);
 
                 key_result.map_err(|error| error.to_string())?;
                 release_result?;

@@ -393,6 +393,7 @@ struct ConsoleApp {
     last_synced_stream_profile: Option<StreamQualityProfile>,
     last_synced_stream_codec: Option<StreamCodecPreference>,
     remote_input_captured: bool,
+    remote_pointer_button_down: Option<egui::PointerButton>,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     signal_tx: Sender<SignalEvent>,
@@ -453,6 +454,7 @@ impl ConsoleApp {
             last_synced_stream_profile: None,
             last_synced_stream_codec: None,
             remote_input_captured: false,
+            remote_pointer_button_down: None,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
             signal_tx,
@@ -742,6 +744,7 @@ impl ConsoleApp {
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
         self.remote_input_captured = false;
+        self.remote_pointer_button_down = None;
         self.apply_hosts(
             demo_hosts(),
             true,
@@ -772,6 +775,7 @@ impl ConsoleApp {
         self.last_synced_stream_profile = None;
         self.last_synced_stream_codec = None;
         self.remote_input_captured = false;
+        self.remote_pointer_button_down = None;
 
         if self.using_demo_data || !self.signed_in() {
             self.status_line = if view_only {
@@ -1258,7 +1262,7 @@ impl ConsoleApp {
                     button,
                     pressed,
                     ..
-                } if image_rect.contains(pos) => {
+                } if image_rect.contains(pos) || (self.remote_input_captured && !pressed) => {
                     self.remote_input_captured = true;
                     response.request_focus();
 
@@ -1271,6 +1275,11 @@ impl ConsoleApp {
                         _ => "left",
                     };
                     let action = if pressed { "press" } else { "release" };
+                    if pressed {
+                        self.remote_pointer_button_down = Some(button);
+                    } else if self.remote_pointer_button_down == Some(button) {
+                        self.remote_pointer_button_down = None;
+                    }
                     if let Err(error) = signal::send_mouse_event(
                         &server_url,
                         &token,
@@ -1285,9 +1294,7 @@ impl ConsoleApp {
                         self.status_line = format!("Не удалось отправить мышь: {error}");
                     }
                 }
-                egui::Event::PointerMoved(pos)
-                    if self.remote_input_captured && image_rect.contains(pos) =>
-                {
+                egui::Event::PointerMoved(pos) if self.remote_input_captured => {
                     let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
                     let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
                     if let Err(error) = signal::send_mouse_event(
