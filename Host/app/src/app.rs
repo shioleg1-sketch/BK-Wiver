@@ -827,7 +827,7 @@ impl HostApp {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let profile = Arc::new(Mutex::new(media::StreamProfile::Sharp));
-        let codec_preference = Arc::new(Mutex::new(media::StreamCodec::H264));
+        let codec_preference = Arc::new(Mutex::new(media::StreamCodec::Auto));
         media::spawn_stream(
             self.active_server_url(),
             self.registration.device_token.clone(),

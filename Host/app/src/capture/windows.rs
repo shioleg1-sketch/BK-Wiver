@@ -3,10 +3,10 @@ use image::{ImageBuffer, RgbaImage};
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, COLORONCOLOR,
-        CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-        GetDC, GetDIBits, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
-        SetStretchBltMode, StretchBlt,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, COLORONCOLOR, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
+        SRCCOPY,
     },
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SM_REMOTESESSION},
 };
@@ -14,8 +14,8 @@ use windows_sys::Win32::{
 use crate::logging;
 
 use super::{
+    common::{fit_frame, ScreenshotsCaptureBackend},
     CaptureFrame,
-    common::{ScreenshotsCaptureBackend, fit_frame},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,14 +115,12 @@ impl WindowsCaptureEngine {
 
                             if should_retry_dxgi(&error) {
                                 match self.capture_with_gdi(max_dimensions) {
-                                    Ok(image) => {
-                                        self.capture_frame(
-                                            image,
-                                            "windows-gdi-temporary",
-                                            false,
-                                            frame_index,
-                                        )
-                                    }
+                                    Ok(image) => self.capture_frame(
+                                        image,
+                                        "windows-gdi-temporary",
+                                        false,
+                                        frame_index,
+                                    ),
                                     Err(gdi_error) => {
                                         logging::append_log(
                                             "WARN",
@@ -158,19 +156,17 @@ impl WindowsCaptureEngine {
                     self.capture(max_dimensions, frame_index)
                 }
             }
-            WindowsCaptureBackendKind::Win32Gdi => {
-                match self.capture_with_gdi(max_dimensions) {
-                    Ok(image) => {
-                        let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop
-                        {
-                            "windows-rdp-gdi"
-                        } else {
-                            "windows-gdi"
-                        };
-                        self.capture_frame(image, backend_name, false, frame_index)
-                    }
-                    Err(error) => {
-                        logging::append_log(
+            WindowsCaptureBackendKind::Win32Gdi => match self.capture_with_gdi(max_dimensions) {
+                Ok(image) => {
+                    let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop {
+                        "windows-rdp-gdi"
+                    } else {
+                        "windows-gdi"
+                    };
+                    self.capture_frame(image, backend_name, false, frame_index)
+                }
+                Err(error) => {
+                    logging::append_log(
                             "WARN",
                             "capture.gdi",
                             format!(
@@ -178,11 +174,10 @@ impl WindowsCaptureEngine {
                                 error
                             ),
                         );
-                        self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
-                        self.capture_with_screenshots(max_dimensions, frame_index)
-                    }
+                    self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
+                    self.capture_with_screenshots(max_dimensions, frame_index)
                 }
-            }
+            },
             WindowsCaptureBackendKind::ScreenshotsFallback => {
                 self.capture_with_screenshots(max_dimensions, frame_index)
             }
@@ -292,7 +287,11 @@ impl WindowsCaptureEngine {
             } else {
                 "windows-gdi"
             };
-            logging::append_log("INFO", "capture", format!("retrying backend {backend_name}"));
+            logging::append_log(
+                "INFO",
+                "capture",
+                format!("retrying backend {backend_name}"),
+            );
             self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
         }
     }
@@ -315,16 +314,20 @@ impl DxgiCaptureBackend {
         })
     }
 
-    fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> Result<RgbaImage, String> {
+    fn capture(
+        &mut self,
+        max_dimensions: (u32, u32),
+        frame_index: u32,
+    ) -> Result<RgbaImage, String> {
         match self.manager.capture_frame_components() {
-            Ok((mut bgra, (width, height))) => {
-                for pixel in bgra.chunks_exact_mut(4) {
-                    pixel.swap(0, 2);
-                }
-
-                let image = ImageBuffer::from_raw(width as u32, height as u32, bgra)
-                    .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
-                let image = fit_frame(image, max_dimensions);
+            Ok((bgra, (width, height))) => {
+                let image = if width as u32 == max_dimensions.0 && height as u32 == max_dimensions.1
+                {
+                    ImageBuffer::from_raw(width as u32, height as u32, bgra)
+                        .ok_or_else(|| "failed to build BGRA frame".to_owned())?
+                } else {
+                    fit_bgra_frame(width as u32, height as u32, bgra, max_dimensions)?
+                };
                 if self.last_frame.is_none()
                     || frame_index.wrapping_sub(self.last_frame_index) >= 30
                 {
@@ -459,19 +462,22 @@ impl GdiCaptureBackend {
             return Err("GetDIBits failed".to_owned());
         }
 
-        let mut rgba = self.bgra.clone();
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-
-        let image = ImageBuffer::from_raw(self.capture_width as u32, self.capture_height as u32, rgba)
-            .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
+        let image = ImageBuffer::from_raw(
+            self.capture_width as u32,
+            self.capture_height as u32,
+            self.bgra.clone(),
+        );
         Ok(if self.capture_width as u32 == max_dimensions.0
             && self.capture_height as u32 == max_dimensions.1
         {
-            image
+            image.ok_or_else(|| "failed to build BGRA frame".to_owned())?
         } else {
-            fit_frame(image, max_dimensions)
+            fit_bgra_frame(
+                self.capture_width as u32,
+                self.capture_height as u32,
+                self.bgra.clone(),
+                max_dimensions,
+            )?
         })
     }
 
@@ -525,6 +531,25 @@ impl GdiCaptureBackend {
             bgra: vec![0_u8; (capture_width as usize) * (capture_height as usize) * 4],
         })
     }
+}
+
+fn fit_bgra_frame(
+    width: u32,
+    height: u32,
+    mut bgra: Vec<u8>,
+    max_dimensions: (u32, u32),
+) -> Result<RgbaImage, String> {
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    let rgba = ImageBuffer::from_raw(width, height, bgra)
+        .ok_or_else(|| "failed to build RGBA frame".to_owned())?;
+    let mut fitted = fit_frame(rgba, max_dimensions);
+    for pixel in fitted.as_mut().chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Ok(fitted)
 }
 
 impl Drop for GdiCaptureBackend {
@@ -581,7 +606,8 @@ fn desired_capture_size(
         return (1, 1);
     }
 
-    let target = capture_target_dimensions(source_width as u32, source_height as u32, max_dimensions);
+    let target =
+        capture_target_dimensions(source_width as u32, source_height as u32, max_dimensions);
     (target.0.max(1) as i32, target.1.max(1) as i32)
 }
 
