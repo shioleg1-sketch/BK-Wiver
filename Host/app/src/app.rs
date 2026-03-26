@@ -283,6 +283,8 @@ struct HostApp {
     signal_listener_key: Option<String>,
     media_sessions: BTreeMap<String, HostMediaSession>,
     input_controller: Option<Enigo>,
+    pressed_mouse_buttons: Vec<Button>,
+    pressed_keys: Vec<Key>,
     command_rx: Receiver<HostUiCommand>,
     signal_rx: Receiver<SignalEvent>,
     signal_tx: Sender<SignalEvent>,
@@ -314,6 +316,8 @@ impl HostApp {
             signal_listener_key: None,
             media_sessions: BTreeMap::new(),
             input_controller: None,
+            pressed_mouse_buttons: Vec::new(),
+            pressed_keys: Vec::new(),
             command_rx,
             signal_rx,
             signal_tx,
@@ -642,6 +646,7 @@ impl HostApp {
                     }
                 }
                 SignalEvent::SessionClosed { session_id } => {
+                    let _ = self.release_input_state();
                     logging::append_log(
                         "INFO",
                         "session.closed",
@@ -663,6 +668,17 @@ impl HostApp {
                         current_signal_status,
                     );
                 }
+                SignalEvent::InputReset { session_id } => match self.release_input_state() {
+                    Ok(()) => {
+                        self.status_line =
+                            format!("Состояние ввода сброшено для сеанса {session_id}.");
+                    }
+                    Err(error) => {
+                        self.status_line = format!(
+                            "Не удалось сбросить ввод для сеанса {session_id}: {error}"
+                        );
+                    }
+                },
                 SignalEvent::MouseInput {
                     session_id,
                     action,
@@ -697,10 +713,11 @@ impl HostApp {
                 SignalEvent::KeyInput {
                     session_id,
                     kind,
+                    action,
                     key,
                     text,
                     modifiers,
-                } => match self.apply_key_input(&kind, &key, &text, &modifiers) {
+                } => match self.apply_key_input(&kind, &action, &key, &text, &modifiers) {
                     Ok(()) => {
                         self.status_line =
                             format!("Выполнена клавиатурная команда для сеанса {session_id}.");
@@ -752,12 +769,11 @@ impl HostApp {
         scroll_x: f32,
         scroll_y: f32,
     ) -> Result<(), String> {
-        let screen = select_primary_screen().ok_or_else(|| "экран не найден".to_owned())?;
-        let info = screen.display_info;
-        let width = info.width.max(1) as f32;
-        let height = info.height.max(1) as f32;
-        let x = info.x + (x_norm.clamp(0.0, 1.0) * width).round() as i32;
-        let y = info.y + (y_norm.clamp(0.0, 1.0) * height).round() as i32;
+        let bounds = input_target_bounds()?;
+        let width = bounds.width.max(1) as f32;
+        let height = bounds.height.max(1) as f32;
+        let x = bounds.x + (x_norm.clamp(0.0, 1.0) * width).round() as i32;
+        let y = bounds.y + (y_norm.clamp(0.0, 1.0) * height).round() as i32;
 
         let enigo = self.ensure_input_controller()?;
         enigo
@@ -784,25 +800,47 @@ impl HostApp {
             return Ok(());
         }
 
-        let button = match button {
-            "right" => Button::Right,
-            "middle" => Button::Middle,
-            _ => Button::Left,
+        let Some(button) = (match button {
+            "right" => Some(Button::Right),
+            "middle" => Some(Button::Middle),
+            "back" | "forward" => None,
+            _ => Some(Button::Left),
+        }) else {
+            return Ok(());
         };
-        let direction = match action {
-            "press" => Direction::Press,
-            "release" => Direction::Release,
-            _ => Direction::Click,
-        };
-
-        enigo
-            .button(button, direction)
-            .map_err(|error| error.to_string())
+        match action {
+            "press" => {
+                enigo
+                    .button(button, Direction::Press)
+                    .map_err(|error| error.to_string())?;
+                remember_pressed_button(&mut self.pressed_mouse_buttons, button);
+                Ok(())
+            }
+            "release" => {
+                enigo
+                    .button(button, Direction::Release)
+                    .map_err(|error| error.to_string())?;
+                forget_pressed_button(&mut self.pressed_mouse_buttons, button);
+                Ok(())
+            }
+            "double_click" => {
+                enigo
+                    .button(button, Direction::Click)
+                    .map_err(|error| error.to_string())?;
+                enigo
+                    .button(button, Direction::Click)
+                    .map_err(|error| error.to_string())
+            }
+            _ => enigo
+                .button(button, Direction::Click)
+                .map_err(|error| error.to_string()),
+        }
     }
 
     fn apply_key_input(
         &mut self,
         kind: &str,
+        action: &str,
         key: &str,
         text: &str,
         modifiers: &[String],
@@ -820,13 +858,49 @@ impl HostApp {
                 };
 
                 let modifier_keys = modifier_keys(modifiers);
+                let is_modifier = modifier_keys.contains(&key);
+                let direction = match action {
+                    "press" => Direction::Press,
+                    "release" => Direction::Release,
+                    _ => Direction::Click,
+                };
+
+                if is_modifier {
+                    enigo
+                        .key(key, direction)
+                        .map_err(|error| error.to_string())?;
+                    update_pressed_key_state(&mut self.pressed_keys, key, action);
+                    return Ok(());
+                }
+
                 press_modifier_keys(enigo, &modifier_keys)?;
-                let key_result = enigo.key(key, Direction::Click);
+                let key_result = enigo.key(key, direction);
                 let release_result = release_modifier_keys(enigo, &modifier_keys);
 
                 key_result.map_err(|error| error.to_string())?;
                 release_result?;
+                update_pressed_key_state(&mut self.pressed_keys, key, action);
             }
+        }
+
+        Ok(())
+    }
+
+    fn release_input_state(&mut self) -> Result<(), String> {
+        let pressed_mouse_buttons = std::mem::take(&mut self.pressed_mouse_buttons);
+        let pressed_keys = std::mem::take(&mut self.pressed_keys);
+        let enigo = self.ensure_input_controller()?;
+
+        for button in pressed_mouse_buttons.into_iter().rev() {
+            enigo
+                .button(button, Direction::Release)
+                .map_err(|error| error.to_string())?;
+        }
+
+        for key in pressed_keys.into_iter().rev() {
+            enigo
+                .key(key, Direction::Release)
+                .map_err(|error| error.to_string())?;
         }
 
         Ok(())
@@ -841,7 +915,7 @@ impl HostApp {
         }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let profile = Arc::new(Mutex::new(media::StreamProfile::Sharp));
+        let profile = Arc::new(Mutex::new(media::StreamProfile::Balanced));
         let codec_preference = Arc::new(Mutex::new(media::StreamCodec::Auto));
         media::spawn_stream(
             self.active_server_url(),
@@ -1435,6 +1509,57 @@ fn select_primary_screen() -> Option<Screen> {
         .or_else(|| screens.into_iter().next())
 }
 
+struct InputTargetBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(windows)]
+fn input_target_bounds() -> Result<InputTargetBounds, String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_REMOTESESSION,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 {
+        let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        if width > 0 && height > 0 {
+            return Ok(InputTargetBounds {
+                x,
+                y,
+                width: width as u32,
+                height: height as u32,
+            });
+        }
+    }
+
+    let screen = select_primary_screen().ok_or_else(|| "экран не найден".to_owned())?;
+    let info = screen.display_info;
+    Ok(InputTargetBounds {
+        x: info.x,
+        y: info.y,
+        width: info.width.max(1) as u32,
+        height: info.height.max(1) as u32,
+    })
+}
+
+#[cfg(not(windows))]
+fn input_target_bounds() -> Result<InputTargetBounds, String> {
+    let screen = select_primary_screen().ok_or_else(|| "экран не найден".to_owned())?;
+    let info = screen.display_info;
+    Ok(InputTargetBounds {
+        x: info.x,
+        y: info.y,
+        width: info.width.max(1) as u32,
+        height: info.height.max(1) as u32,
+    })
+}
+
 fn modifier_keys(modifiers: &[String]) -> Vec<Key> {
     let mut keys = Vec::new();
 
@@ -1453,6 +1578,30 @@ fn modifier_keys(modifiers: &[String]) -> Vec<Key> {
     }
 
     keys
+}
+
+fn remember_pressed_button(buttons: &mut Vec<Button>, button: Button) {
+    if !buttons.contains(&button) {
+        buttons.push(button);
+    }
+}
+
+fn forget_pressed_button(buttons: &mut Vec<Button>, button: Button) {
+    buttons.retain(|value| *value != button);
+}
+
+fn update_pressed_key_state(keys: &mut Vec<Key>, key: Key, action: &str) {
+    match action {
+        "press" => {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        "release" => {
+            keys.retain(|value| *value != key);
+        }
+        _ => {}
+    }
 }
 
 fn press_modifier_keys(enigo: &mut Enigo, modifiers: &[Key]) -> Result<(), String> {
@@ -1493,6 +1642,18 @@ fn remote_named_key(key: &str) -> Option<Key> {
         "end" => Some(Key::End),
         "page_up" => Some(Key::PageUp),
         "page_down" => Some(Key::PageDown),
+        "semicolon" | "colon" => Some(Key::OEM1),
+        "slash" | "questionmark" => Some(Key::OEM2),
+        "backtick" => Some(Key::OEM3),
+        "open_bracket" | "open_curly_bracket" => Some(Key::OEM4),
+        "backslash" | "pipe" => Some(Key::OEM5),
+        "close_bracket" | "close_curly_bracket" => Some(Key::OEM6),
+        "quote" => Some(Key::OEM7),
+        "comma" => Some(Key::OEMComma),
+        "minus" => Some(Key::OEMMinus),
+        "period" => Some(Key::OEMPeriod),
+        "plus" | "equals" => Some(Key::OEMPlus),
+        "exclamationmark" => Some(Key::Num1),
         "a" => Some(Key::A),
         "b" => Some(Key::B),
         "c" => Some(Key::C),
@@ -1541,6 +1702,19 @@ fn remote_named_key(key: &str) -> Option<Key> {
         "f10" => Some(Key::F10),
         "f11" => Some(Key::F11),
         "f12" => Some(Key::F12),
+        "f13" => Some(Key::F13),
+        "f14" => Some(Key::F14),
+        "f15" => Some(Key::F15),
+        "f16" => Some(Key::F16),
+        "f17" => Some(Key::F17),
+        "f18" => Some(Key::F18),
+        "f19" => Some(Key::F19),
+        "f20" => Some(Key::F20),
+        "f21" => Some(Key::F21),
+        "f22" => Some(Key::F22),
+        "f23" => Some(Key::F23),
+        "f24" => Some(Key::F24),
+        "browser_back" => Some(Key::BrowserBack),
         _ => None,
     }
 }

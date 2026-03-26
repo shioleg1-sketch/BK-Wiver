@@ -22,7 +22,7 @@ pub enum SignalEvent {
     SessionClosed { session_id: String },
 }
 
-const SIGNAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SIGNAL_POLL_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_PING_INTERVAL: Duration = Duration::from_secs(10);
 const SIGNAL_RECONNECT_DELAYS_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
 
@@ -53,7 +53,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
                     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-                        let _ = stream.set_read_timeout(Some(SIGNAL_READ_TIMEOUT));
+                        let _ = stream.set_read_timeout(Some(SIGNAL_POLL_TIMEOUT));
                     }
                     was_connected = true;
                     reconnect_attempt = 0;
@@ -107,8 +107,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                                     ErrorKind::WouldBlock | ErrorKind::TimedOut
                                 ) =>
                             {
-                                disconnect_reason = format!("read timeout: {}", error);
-                                break;
+                                continue;
                             }
                             Err(error) => {
                                 disconnect_reason = format!("socket error: {error}");
@@ -149,6 +148,17 @@ pub fn send_session_closed(server_url: &str, token: &str, session_id: &str) -> R
         token,
         json!({
             "type": "session.closed",
+            "sessionId": session_id,
+        }),
+    )
+}
+
+pub fn send_input_reset(server_url: &str, token: &str, session_id: &str) -> Result<(), String> {
+    send_message(
+        server_url,
+        token,
+        json!({
+            "type": "session.input_reset",
             "sessionId": session_id,
         }),
     )
@@ -204,6 +214,7 @@ pub fn send_key_named(
     token: &str,
     session_id: &str,
     key: &str,
+    action: &str,
     modifiers: &[&str],
 ) -> Result<(), String> {
     send_message(
@@ -214,6 +225,7 @@ pub fn send_key_named(
             "sessionId": session_id,
             "kind": "named",
             "key": key,
+            "action": action,
             "modifiers": modifiers,
         }),
     )

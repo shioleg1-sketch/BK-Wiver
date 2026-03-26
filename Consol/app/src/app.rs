@@ -397,6 +397,7 @@ struct ConsoleApp {
     last_synced_stream_codec: Option<StreamCodecPreference>,
     remote_input_captured: bool,
     remote_pointer_button_down: Option<egui::PointerButton>,
+    last_remote_pointer_pos: Option<egui::Pos2>,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     signal_tx: Sender<SignalEvent>,
@@ -404,6 +405,7 @@ struct ConsoleApp {
 }
 
 const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
+const REMOTE_MOUSE_SCROLL_SCALE: f32 = 24.0;
 
 impl ConsoleApp {
     fn new(cc: &CreationContext<'_>) -> Self {
@@ -451,13 +453,14 @@ impl ConsoleApp {
             media_changed_frame_count: 0,
             media_last_frame_at_ms: 0,
             media_last_frame_signature: 0,
-            stream_quality_profile: StreamQualityProfile::Sharp,
+            stream_quality_profile: StreamQualityProfile::Balanced,
             stream_codec_preference: default_stream_codec_preference(),
             last_synced_stream_session_id: None,
             last_synced_stream_profile: None,
             last_synced_stream_codec: None,
             remote_input_captured: false,
             remote_pointer_button_down: None,
+            last_remote_pointer_pos: None,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
             signal_tx,
@@ -671,6 +674,9 @@ impl ConsoleApp {
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
                         self.media_codec = None;
+                        self.remote_input_captured = false;
+                        self.remote_pointer_button_down = None;
+                        self.last_remote_pointer_pos = None;
                         self.status_line = format!("Сеанс {session_id} отклонён хостом.");
                         self.add_activity(format!("Хост отклонил сеанс {session_id}"));
                     }
@@ -692,6 +698,9 @@ impl ConsoleApp {
                         self.stop_media_listener();
                         self.media_connected_session_id = None;
                         self.media_codec = None;
+                        self.remote_input_captured = false;
+                        self.remote_pointer_button_down = None;
+                        self.last_remote_pointer_pos = None;
                         self.status_line = format!("Сеанс {session_id} завершён.");
                         self.add_activity(format!("Сеанс {session_id} закрыт"));
                     }
@@ -748,6 +757,7 @@ impl ConsoleApp {
         self.media_last_frame_signature = 0;
         self.remote_input_captured = false;
         self.remote_pointer_button_down = None;
+        self.last_remote_pointer_pos = None;
         self.apply_hosts(
             demo_hosts(),
             true,
@@ -772,13 +782,14 @@ impl ConsoleApp {
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
         self.media_last_frame_signature = 0;
-        self.stream_quality_profile = StreamQualityProfile::Sharp;
+        self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.stream_codec_preference = default_stream_codec_preference();
         self.last_synced_stream_session_id = None;
         self.last_synced_stream_profile = None;
         self.last_synced_stream_codec = None;
         self.remote_input_captured = false;
         self.remote_pointer_button_down = None;
+        self.last_remote_pointer_pos = None;
 
         if self.using_demo_data || !self.signed_in() {
             self.status_line = if view_only {
@@ -861,6 +872,8 @@ impl ConsoleApp {
             self.media_last_frame_signature = 0;
             self.session_texture = None;
             self.remote_input_captured = false;
+            self.remote_pointer_button_down = None;
+            self.last_remote_pointer_pos = None;
             return;
         }
 
@@ -888,6 +901,8 @@ impl ConsoleApp {
                 self.media_last_frame_signature = 0;
                 self.session_texture = None;
                 self.remote_input_captured = false;
+                self.remote_pointer_button_down = None;
+                self.last_remote_pointer_pos = None;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
                     session.session_id
@@ -1127,7 +1142,7 @@ impl ConsoleApp {
         let available = ui.available_size_before_wrap();
         let desired_height = available.y.max(260.0);
         let desired_size = Vec2::new(available.x.max(320.0), desired_height);
-        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         let has_live_frame = self.session_texture.is_some();
         let image_rect = rect.shrink2(Vec2::new(8.0, 40.0));
 
@@ -1256,6 +1271,7 @@ impl ConsoleApp {
         };
 
         let server_url = normalize_server_url(&self.server_url);
+        let mut pending_move: Option<egui::Pos2> = None;
 
         let events = ctx.input(|input| input.events.clone());
         for event in events {
@@ -1267,6 +1283,7 @@ impl ConsoleApp {
                     ..
                 } if image_rect.contains(pos) || (self.remote_input_captured && !pressed) => {
                     self.remote_input_captured = true;
+                    self.last_remote_pointer_pos = Some(pos);
                     response.request_focus();
 
                     let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
@@ -1275,7 +1292,8 @@ impl ConsoleApp {
                         egui::PointerButton::Primary => "left",
                         egui::PointerButton::Secondary => "right",
                         egui::PointerButton::Middle => "middle",
-                        _ => "left",
+                        egui::PointerButton::Extra1 => "back",
+                        egui::PointerButton::Extra2 => "forward",
                     };
                     let action = if pressed { "press" } else { "release" };
                     if pressed {
@@ -1297,29 +1315,21 @@ impl ConsoleApp {
                         self.status_line = format!("Не удалось отправить мышь: {error}");
                     }
                 }
-                egui::Event::PointerMoved(pos) if self.remote_input_captured => {
-                    let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
-                    let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
-                    if let Err(error) = signal::send_mouse_event(
-                        &server_url,
-                        &token,
-                        &session.session_id,
-                        "move",
-                        "left",
-                        x_norm,
-                        y_norm,
-                        0.0,
-                        0.0,
-                    ) {
-                        self.status_line = format!("Не удалось отправить движение мыши: {error}");
-                    }
+                egui::Event::PointerMoved(pos)
+                    if self.remote_input_captured
+                        && (image_rect.contains(pos) || self.remote_pointer_button_down.is_some()) =>
+                {
+                    self.last_remote_pointer_pos = Some(pos);
+                    pending_move = Some(pos);
                 }
                 egui::Event::MouseWheel { delta, .. } if self.remote_input_captured => {
-                    let pointer_pos = ctx.input(|input| input.pointer.hover_pos());
+                    let pointer_pos = ctx
+                        .input(|input| input.pointer.hover_pos())
+                        .or(self.last_remote_pointer_pos);
                     let Some(pointer_pos) = pointer_pos else {
                         continue;
                     };
-                    if !image_rect.contains(pointer_pos) {
+                    if !image_rect.contains(pointer_pos) && self.remote_pointer_button_down.is_none() {
                         continue;
                     }
 
@@ -1327,8 +1337,8 @@ impl ConsoleApp {
                         .clamp(0.0, 1.0);
                     let y_norm =
                         ((pointer_pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
-                    let scroll_x = (delta.x / 24.0).clamp(-6.0, 6.0);
-                    let scroll_y = (-delta.y / 24.0).clamp(-6.0, 6.0);
+                    let scroll_x = (delta.x / REMOTE_MOUSE_SCROLL_SCALE).clamp(-6.0, 6.0);
+                    let scroll_y = (-delta.y / REMOTE_MOUSE_SCROLL_SCALE).clamp(-6.0, 6.0);
                     if scroll_x != 0.0 || scroll_y != 0.0 {
                         if let Err(error) = signal::send_mouse_event(
                             &server_url,
@@ -1343,6 +1353,13 @@ impl ConsoleApp {
                         ) {
                             self.status_line = format!("Не удалось отправить прокрутку: {error}");
                         }
+                    }
+                }
+                egui::Event::PointerGone if self.remote_input_captured => {
+                    if self.remote_pointer_button_down.is_none() {
+                        self.remote_input_captured = false;
+                        self.last_remote_pointer_pos = None;
+                        self.send_remote_input_reset(&server_url, &token, &session.session_id);
                     }
                 }
                 egui::Event::Text(text) => {
@@ -1362,12 +1379,20 @@ impl ConsoleApp {
                 }
                 egui::Event::Key {
                     key,
-                    pressed: true,
-                    repeat: false,
+                    pressed,
+                    repeat,
                     modifiers,
                     ..
                 } => {
                     if !self.remote_input_captured {
+                        continue;
+                    }
+                    if key == egui::Key::Escape && pressed && !repeat {
+                        self.remote_input_captured = false;
+                        self.remote_pointer_button_down = None;
+                        self.last_remote_pointer_pos = None;
+                        self.send_remote_input_reset(&server_url, &token, &session.session_id);
+                        self.status_line = "Ввод освобождён от удалённого сеанса.".to_owned();
                         continue;
                     }
                     if let Some(named_key) = map_egui_key(key)
@@ -1377,6 +1402,11 @@ impl ConsoleApp {
                             &token,
                             &session.session_id,
                             named_key,
+                            if pressed {
+                                if repeat { "repeat" } else { "press" }
+                            } else {
+                                "release"
+                            },
                             &modifiers,
                         )
                     {
@@ -1385,6 +1415,30 @@ impl ConsoleApp {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(pos) = pending_move {
+            let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+            let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+            if let Err(error) = signal::send_mouse_event(
+                &server_url,
+                &token,
+                &session.session_id,
+                "move",
+                "left",
+                x_norm,
+                y_norm,
+                0.0,
+                0.0,
+            ) {
+                self.status_line = format!("Не удалось отправить движение мыши: {error}");
+            }
+        }
+    }
+
+    fn send_remote_input_reset(&mut self, server_url: &str, token: &str, session_id: &str) {
+        if let Err(error) = signal::send_input_reset(server_url, token, session_id) {
+            self.status_line = format!("Не удалось сбросить состояние ввода: {error}");
         }
     }
 
@@ -1507,7 +1561,7 @@ impl ConsoleApp {
                             });
                             ui.separator();
                             ui.label(if self.remote_input_captured {
-                                "ввод закреплён за сеансом"
+                                "ввод закреплён за сеансом, Esc отпускает"
                             } else {
                                 "кликните по экрану для захвата ввода"
                             });
@@ -1593,6 +1647,15 @@ impl ConsoleApp {
                             if ui.button("Скрыть окно").clicked() {
                                 self.show_session_window = false;
                                 self.remote_input_captured = false;
+                                self.remote_pointer_button_down = None;
+                                self.last_remote_pointer_pos = None;
+                                if let Some(token) = self.access_token.clone() {
+                                    self.send_remote_input_reset(
+                                        &normalize_server_url(&self.server_url),
+                                        &token,
+                                        &session.session_id,
+                                    );
+                                }
                             }
                         });
                     });
@@ -1601,6 +1664,15 @@ impl ConsoleApp {
         self.show_session_window = open;
         if !open {
             self.remote_input_captured = false;
+            self.remote_pointer_button_down = None;
+            self.last_remote_pointer_pos = None;
+            if let Some(token) = self.access_token.clone() {
+                self.send_remote_input_reset(
+                    &normalize_server_url(&self.server_url),
+                    &token,
+                    &session.session_id,
+                );
+            }
         }
     }
 
@@ -2342,6 +2414,24 @@ fn map_egui_key(key: egui::Key) -> Option<&'static str> {
         egui::Key::End => Some("end"),
         egui::Key::PageUp => Some("page_up"),
         egui::Key::PageDown => Some("page_down"),
+        egui::Key::Colon => Some("colon"),
+        egui::Key::Comma => Some("comma"),
+        egui::Key::Backslash => Some("backslash"),
+        egui::Key::Slash => Some("slash"),
+        egui::Key::Pipe => Some("pipe"),
+        egui::Key::Questionmark => Some("questionmark"),
+        egui::Key::Exclamationmark => Some("exclamationmark"),
+        egui::Key::OpenBracket => Some("open_bracket"),
+        egui::Key::CloseBracket => Some("close_bracket"),
+        egui::Key::OpenCurlyBracket => Some("open_curly_bracket"),
+        egui::Key::CloseCurlyBracket => Some("close_curly_bracket"),
+        egui::Key::Backtick => Some("backtick"),
+        egui::Key::Minus => Some("minus"),
+        egui::Key::Period => Some("period"),
+        egui::Key::Plus => Some("plus"),
+        egui::Key::Equals => Some("equals"),
+        egui::Key::Semicolon => Some("semicolon"),
+        egui::Key::Quote => Some("quote"),
         egui::Key::A => Some("a"),
         egui::Key::B => Some("b"),
         egui::Key::C => Some("c"),
@@ -2390,6 +2480,19 @@ fn map_egui_key(key: egui::Key) -> Option<&'static str> {
         egui::Key::F10 => Some("f10"),
         egui::Key::F11 => Some("f11"),
         egui::Key::F12 => Some("f12"),
+        egui::Key::F13 => Some("f13"),
+        egui::Key::F14 => Some("f14"),
+        egui::Key::F15 => Some("f15"),
+        egui::Key::F16 => Some("f16"),
+        egui::Key::F17 => Some("f17"),
+        egui::Key::F18 => Some("f18"),
+        egui::Key::F19 => Some("f19"),
+        egui::Key::F20 => Some("f20"),
+        egui::Key::F21 => Some("f21"),
+        egui::Key::F22 => Some("f22"),
+        egui::Key::F23 => Some("f23"),
+        egui::Key::F24 => Some("f24"),
+        egui::Key::BrowserBack => Some("browser_back"),
         _ => None,
     }
 }

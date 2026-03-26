@@ -24,6 +24,9 @@ pub enum SignalEvent {
     SessionClosed {
         session_id: String,
     },
+    InputReset {
+        session_id: String,
+    },
     MouseInput {
         session_id: String,
         action: String,
@@ -36,6 +39,7 @@ pub enum SignalEvent {
     KeyInput {
         session_id: String,
         kind: String,
+        action: String,
         key: String,
         text: String,
         modifiers: Vec<String>,
@@ -47,7 +51,7 @@ pub enum SignalEvent {
     },
 }
 
-const SIGNAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const SIGNAL_POLL_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_PING_INTERVAL: Duration = Duration::from_secs(10);
 const SIGNAL_RECONNECT_DELAYS_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
 
@@ -77,9 +81,8 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
         loop {
             match connect(url.as_str()) {
                 Ok((mut socket, _)) => {
-                    // Увеличиваем таймаут чтения до 10 секунд для стабильности соединения
                     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
-                        let _ = stream.set_read_timeout(Some(SIGNAL_READ_TIMEOUT));
+                        let _ = stream.set_read_timeout(Some(SIGNAL_POLL_TIMEOUT));
                     }
                     was_connected = true;
                     reconnect_attempt = 0;
@@ -133,8 +136,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                                     ErrorKind::WouldBlock | ErrorKind::TimedOut
                                 ) =>
                             {
-                                disconnect_reason = format!("read timeout: {}", error);
-                                break;
+                                continue;
                             }
                             Err(error) => {
                                 disconnect_reason = format!("socket error: {error}");
@@ -214,6 +216,9 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
         "session.closed" => Some(SignalEvent::SessionClosed {
             session_id: payload.get("sessionId")?.as_str()?.to_owned(),
         }),
+        "session.input_reset" => Some(SignalEvent::InputReset {
+            session_id: payload.get("sessionId")?.as_str()?.to_owned(),
+        }),
         "session.input_mouse" => Some(SignalEvent::MouseInput {
             session_id: payload.get("sessionId")?.as_str()?.to_owned(),
             action: payload
@@ -243,6 +248,11 @@ fn parse_signal_event(text: &str) -> Option<SignalEvent> {
                 .get("kind")
                 .and_then(Value::as_str)
                 .unwrap_or("named")
+                .to_owned(),
+            action: payload
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("click")
                 .to_owned(),
             key: payload
                 .get("key")
