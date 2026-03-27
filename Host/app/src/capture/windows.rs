@@ -467,18 +467,20 @@ impl GdiCaptureBackend {
             self.capture_height as u32,
             self.bgra.clone(),
         );
-        Ok(if self.capture_width as u32 == max_dimensions.0
-            && self.capture_height as u32 == max_dimensions.1
-        {
-            image.ok_or_else(|| "failed to build BGRA frame".to_owned())?
-        } else {
-            fit_bgra_frame(
-                self.capture_width as u32,
-                self.capture_height as u32,
-                self.bgra.clone(),
-                max_dimensions,
-            )?
-        })
+        Ok(
+            if self.capture_width as u32 == max_dimensions.0
+                && self.capture_height as u32 == max_dimensions.1
+            {
+                image.ok_or_else(|| "failed to build BGRA frame".to_owned())?
+            } else {
+                fit_bgra_frame(
+                    self.capture_width as u32,
+                    self.capture_height as u32,
+                    self.bgra.clone(),
+                    max_dimensions,
+                )?
+            },
+        )
     }
 
     fn create(
@@ -621,9 +623,18 @@ fn capture_target_dimensions(
     }
 
     let scale = (max_dimensions.0 as f32 / source_width as f32)
-        .min(max_dimensions.1 as f32 / source_height as f32);
+        .min(max_dimensions.1 as f32 / source_height as f32)
+        .min(1.0);
 
-    let width = ((source_width as f32 * scale).round() as u32).max(1);
-    let height = ((source_height as f32 * scale).round() as u32).max(1);
-    (width, height)
+    let mut width = ((source_width as f32 * scale).round() as u32).max(1);
+    let mut height = ((source_height as f32 * scale).round() as u32).max(1);
+
+    if width > 1 && width % 2 != 0 {
+        width = width.saturating_sub(1);
+    }
+    if height > 1 && height % 2 != 0 {
+        height = height.saturating_sub(1);
+    }
+
+    (width.max(1), height.max(1))
 }

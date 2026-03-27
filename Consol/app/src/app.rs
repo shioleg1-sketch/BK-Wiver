@@ -390,7 +390,6 @@ struct ConsoleApp {
     media_frame_count: u64,
     media_changed_frame_count: u64,
     media_last_frame_at_ms: u64,
-    media_last_frame_signature: u64,
     stream_quality_profile: StreamQualityProfile,
     stream_codec_preference: StreamCodecPreference,
     last_synced_stream_session_id: Option<String>,
@@ -399,6 +398,7 @@ struct ConsoleApp {
     remote_input_captured: bool,
     remote_pointer_button_down: Option<egui::PointerButton>,
     last_remote_pointer_pos: Option<egui::Pos2>,
+    remote_last_move_sent_at_ms: u64,
     last_auto_sign_in_attempt_at_ms: u64,
     signal_listener_key: Option<String>,
     signal_tx: Sender<SignalEvent>,
@@ -407,6 +407,8 @@ struct ConsoleApp {
 
 const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
 const REMOTE_MOUSE_SCROLL_SCALE: f32 = 24.0;
+const REMOTE_MOVE_INTERVAL_IDLE_MS: u64 = 16;
+const REMOTE_MOVE_INTERVAL_DRAG_MS: u64 = 8;
 
 impl ConsoleApp {
     fn new(cc: &CreationContext<'_>) -> Self {
@@ -454,7 +456,6 @@ impl ConsoleApp {
             media_frame_count: 0,
             media_changed_frame_count: 0,
             media_last_frame_at_ms: 0,
-            media_last_frame_signature: 0,
             stream_quality_profile: StreamQualityProfile::Balanced,
             stream_codec_preference: default_stream_codec_preference(),
             last_synced_stream_session_id: None,
@@ -463,6 +464,7 @@ impl ConsoleApp {
             remote_input_captured: false,
             remote_pointer_button_down: None,
             last_remote_pointer_pos: None,
+            remote_last_move_sent_at_ms: 0,
             last_auto_sign_in_attempt_at_ms: 0,
             signal_listener_key: None,
             signal_tx,
@@ -679,6 +681,7 @@ impl ConsoleApp {
                         self.remote_input_captured = false;
                         self.remote_pointer_button_down = None;
                         self.last_remote_pointer_pos = None;
+                        self.remote_last_move_sent_at_ms = 0;
                         self.status_line = format!("Сеанс {session_id} отклонён хостом.");
                         self.add_activity(format!("Хост отклонил сеанс {session_id}"));
                     }
@@ -703,6 +706,7 @@ impl ConsoleApp {
                         self.remote_input_captured = false;
                         self.remote_pointer_button_down = None;
                         self.last_remote_pointer_pos = None;
+                        self.remote_last_move_sent_at_ms = 0;
                         self.status_line = format!("Сеанс {session_id} завершён.");
                         self.add_activity(format!("Сеанс {session_id} закрыт"));
                     }
@@ -756,10 +760,10 @@ impl ConsoleApp {
         self.media_frame_count = 0;
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
-        self.media_last_frame_signature = 0;
         self.remote_input_captured = false;
         self.remote_pointer_button_down = None;
         self.last_remote_pointer_pos = None;
+        self.remote_last_move_sent_at_ms = 0;
         self.apply_hosts(
             demo_hosts(),
             true,
@@ -783,7 +787,6 @@ impl ConsoleApp {
         self.media_frame_count = 0;
         self.media_changed_frame_count = 0;
         self.media_last_frame_at_ms = 0;
-        self.media_last_frame_signature = 0;
         self.stream_quality_profile = StreamQualityProfile::Balanced;
         self.stream_codec_preference = default_stream_codec_preference();
         self.last_synced_stream_session_id = None;
@@ -792,6 +795,7 @@ impl ConsoleApp {
         self.remote_input_captured = false;
         self.remote_pointer_button_down = None;
         self.last_remote_pointer_pos = None;
+        self.remote_last_move_sent_at_ms = 0;
 
         if self.using_demo_data || !self.signed_in() {
             self.status_line = if view_only {
@@ -871,11 +875,11 @@ impl ConsoleApp {
             self.media_frame_count = 0;
             self.media_changed_frame_count = 0;
             self.media_last_frame_at_ms = 0;
-            self.media_last_frame_signature = 0;
             self.session_texture = None;
             self.remote_input_captured = false;
             self.remote_pointer_button_down = None;
             self.last_remote_pointer_pos = None;
+            self.remote_last_move_sent_at_ms = 0;
             return;
         }
 
@@ -900,11 +904,11 @@ impl ConsoleApp {
                 self.media_frame_count = 0;
                 self.media_changed_frame_count = 0;
                 self.media_last_frame_at_ms = 0;
-                self.media_last_frame_signature = 0;
                 self.session_texture = None;
                 self.remote_input_captured = false;
                 self.remote_pointer_button_down = None;
                 self.last_remote_pointer_pos = None;
+                self.remote_last_move_sent_at_ms = 0;
                 self.add_activity(format!(
                     "Отправлено завершение сеанса {}",
                     session.session_id
@@ -994,7 +998,6 @@ impl ConsoleApp {
                         self.media_frame_count = 0;
                         self.media_changed_frame_count = 0;
                         self.media_last_frame_at_ms = 0;
-                        self.media_last_frame_signature = 0;
                         self.session_texture = None;
                     }
                 }
@@ -1017,12 +1020,8 @@ impl ConsoleApp {
                     self.media_codec = Some(codec);
                     self.media_frame_count = self.media_frame_count.saturating_add(1);
                     self.media_last_frame_at_ms = now_ms();
-                    let signature = frame_signature(&bytes);
-                    if signature != self.media_last_frame_signature {
-                        self.media_changed_frame_count =
-                            self.media_changed_frame_count.saturating_add(1);
-                        self.media_last_frame_signature = signature;
-                    }
+                    self.media_changed_frame_count =
+                        self.media_changed_frame_count.saturating_add(1);
                     logging::append_log(
                         "DEBUG",
                         "media.frame",
@@ -1322,7 +1321,22 @@ impl ConsoleApp {
                         && (image_rect.contains(pos) || self.remote_pointer_button_down.is_some()) =>
                 {
                     self.last_remote_pointer_pos = Some(pos);
-                    pending_move = Some(pos);
+                    let move_interval_ms = if self.remote_pointer_button_down.is_some() {
+                        REMOTE_MOVE_INTERVAL_DRAG_MS
+                    } else {
+                        REMOTE_MOVE_INTERVAL_IDLE_MS
+                    };
+                    if now_ms().saturating_sub(self.remote_last_move_sent_at_ms) >= move_interval_ms
+                    {
+                        if let Err(error) =
+                            self.send_remote_mouse_move(&server_url, &token, &session.session_id, pos, image_rect)
+                        {
+                            self.status_line =
+                                format!("Не удалось отправить движение мыши: {error}");
+                        }
+                    } else {
+                        pending_move = Some(pos);
+                    }
                 }
                 egui::Event::MouseWheel { delta, .. } if self.remote_input_captured => {
                     let pointer_pos = ctx
@@ -1361,6 +1375,7 @@ impl ConsoleApp {
                     if self.remote_pointer_button_down.is_none() {
                         self.remote_input_captured = false;
                         self.last_remote_pointer_pos = None;
+                        self.remote_last_move_sent_at_ms = 0;
                         self.send_remote_input_reset(&server_url, &token, &session.session_id);
                     }
                 }
@@ -1393,6 +1408,7 @@ impl ConsoleApp {
                         self.remote_input_captured = false;
                         self.remote_pointer_button_down = None;
                         self.last_remote_pointer_pos = None;
+                        self.remote_last_move_sent_at_ms = 0;
                         self.send_remote_input_reset(&server_url, &token, &session.session_id);
                         self.status_line = "Ввод освобождён от удалённого сеанса.".to_owned();
                         continue;
@@ -1420,22 +1436,37 @@ impl ConsoleApp {
         }
 
         if let Some(pos) = pending_move {
-            let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
-            let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
-            if let Err(error) = signal::send_mouse_event(
-                &server_url,
-                &token,
-                &session.session_id,
-                "move",
-                "left",
-                x_norm,
-                y_norm,
-                0.0,
-                0.0,
-            ) {
+            if let Err(error) =
+                self.send_remote_mouse_move(&server_url, &token, &session.session_id, pos, image_rect)
+            {
                 self.status_line = format!("Не удалось отправить движение мыши: {error}");
             }
         }
+    }
+
+    fn send_remote_mouse_move(
+        &mut self,
+        server_url: &str,
+        token: &str,
+        session_id: &str,
+        pos: egui::Pos2,
+        image_rect: egui::Rect,
+    ) -> Result<(), String> {
+        let x_norm = ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+        let y_norm = ((pos.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+        signal::send_mouse_event(
+            server_url,
+            token,
+            session_id,
+            "move",
+            "left",
+            x_norm,
+            y_norm,
+            0.0,
+            0.0,
+        )?;
+        self.remote_last_move_sent_at_ms = now_ms();
+        Ok(())
     }
 
     fn send_remote_input_reset(&mut self, server_url: &str, token: &str, session_id: &str) {
@@ -1693,6 +1724,7 @@ impl ConsoleApp {
                                     self.remote_input_captured = false;
                                     self.remote_pointer_button_down = None;
                                     self.last_remote_pointer_pos = None;
+                                    self.remote_last_move_sent_at_ms = 0;
                                     if let Some(token) = self.access_token.clone() {
                                         self.send_remote_input_reset(
                                             &normalize_server_url(&self.server_url),
@@ -1730,6 +1762,7 @@ impl ConsoleApp {
             self.remote_input_captured = false;
             self.remote_pointer_button_down = None;
             self.last_remote_pointer_pos = None;
+            self.remote_last_move_sent_at_ms = 0;
             if let Some(token) = self.access_token.clone() {
                 self.send_remote_input_reset(
                     &normalize_server_url(&self.server_url),
@@ -3299,14 +3332,6 @@ fn format_frame_age(value: u64) -> String {
     } else {
         format!("{:.1}с назад", elapsed_ms as f32 / 1000.0)
     }
-}
-
-fn frame_signature(bytes: &[u8]) -> u64 {
-    let mut signature = bytes.len() as u64;
-    for &byte in bytes.iter().step_by((bytes.len() / 64).max(1)).take(64) {
-        signature = signature.rotate_left(5) ^ u64::from(byte);
-    }
-    signature
 }
 
 fn shorten_commit(commit: &str) -> String {

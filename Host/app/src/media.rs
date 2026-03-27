@@ -89,10 +89,8 @@ impl HardwareEncoder {
 }
 
 fn resolve_auto_codec(best_h264_encoder: HardwareEncoder) -> StreamCodec {
-    match best_h264_encoder {
-        HardwareEncoder::Libx264 => StreamCodec::Vp8,
-        _ => StreamCodec::H264,
-    }
+    let _ = best_h264_encoder;
+    StreamCodec::H264
 }
 
 pub fn detect_best_h264_encoder() -> HardwareEncoder {
@@ -150,6 +148,9 @@ struct RawFrame {
     data: Vec<u8>,
     width: u32,
     height: u32,
+    backend: &'static str,
+    capture_ms: u128,
+    captured_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -620,6 +621,8 @@ pub fn spawn_stream(
         let frame_drop_rx = frame_rx.clone();
         let stop_capture = stop_flag.clone();
         let capture_profile = profile.clone();
+        let capture_session_id = session_id.clone();
+        let encode_session_id = session_id.clone();
 
         let capture_handle = thread::spawn(move || {
             let mut frame_index = 0u32;
@@ -633,6 +636,7 @@ pub fn spawn_stream(
                     .unwrap_or(StreamProfile::Balanced);
                 let capture_started = Instant::now();
                 let captured = capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                let capture_ms = capture_started.elapsed().as_millis();
 
                 if captured.used_fallback && frame_index % 60 == 1 {
                     logging::append_log(
@@ -647,6 +651,9 @@ pub fn spawn_stream(
                     width: frame_image.width(),
                     height: frame_image.height(),
                     data: frame_image.into_raw(),
+                    backend: captured.backend,
+                    capture_ms,
+                    captured_at: Instant::now(),
                 };
 
                 match frame_tx.try_send(frame) {
@@ -668,6 +675,21 @@ pub fn spawn_stream(
                         }
                     }
                     Err(TrySendError::Disconnected(_)) => break,
+                }
+
+                if frame_index < 5 || frame_index % 60 == 0 {
+                    logging::append_log(
+                        "INFO",
+                        "media.capture_perf",
+                        format!(
+                            "session_id={} backend={} profile={} frame={} capture_ms={}",
+                            capture_session_id,
+                            captured.backend,
+                            stream_profile.wire_name(),
+                            frame_index.saturating_add(1),
+                            capture_ms
+                        ),
+                    );
                 }
 
                 frame_index = frame_index.wrapping_add(1);
@@ -701,7 +723,7 @@ pub fn spawn_stream(
                             "media",
                             format!(
                                 "encoder thread connected session_id={} encoder={}",
-                                session_id,
+                                encode_session_id,
                                 best_encoder.codec_name()
                             ),
                         );
@@ -740,7 +762,7 @@ pub fn spawn_stream(
                                                 "media.codec_auto",
                                                 format!(
                                                     "session_id={} retrying codec=h264 after cooldown",
-                                                    session_id
+                                                    encode_session_id
                                                 ),
                                             );
                                         }
@@ -778,10 +800,12 @@ pub fn spawn_stream(
                             }
 
                             let encode_started = Instant::now();
+                            let queue_ms = frame.captured_at.elapsed().as_millis();
 
                             match selected_codec {
                                 StreamCodec::H264 => {
                                     let mut sent_packets_this_frame = 0u64;
+                                    let mut sent_bytes_this_frame = 0usize;
                                     if let Err(error) = ensure_h264_encoder_hw(
                                         &mut h264_encoder,
                                         frame.width,
@@ -809,7 +833,7 @@ pub fn spawn_stream(
                                                     "media.codec_auto",
                                                     format!(
                                                         "session_id={} fallback={} reason=h264_start_failed",
-                                                        session_id,
+                                                        encode_session_id,
                                                         fallback.wire_name()
                                                     ),
                                                 );
@@ -855,11 +879,18 @@ pub fn spawn_stream(
                                                     );
                                                 }
 
+                                                let payload_len =
+                                                    packets.iter().map(Vec::len).sum::<usize>();
+                                                let mut payload = Vec::with_capacity(payload_len);
                                                 for packet in packets {
+                                                    payload.extend_from_slice(&packet);
+                                                }
+
+                                                if !payload.is_empty() {
                                                     let packet = encode_media_packet(
                                                         StreamCodec::H264,
                                                         MediaPacketKind::Frame,
-                                                        &packet,
+                                                        &payload,
                                                     );
                                                     if socket
                                                         .send(Message::Binary(packet.into()))
@@ -869,6 +900,10 @@ pub fn spawn_stream(
                                                     }
                                                     sent_packets_this_frame =
                                                         sent_packets_this_frame.saturating_add(1);
+                                                    sent_bytes_this_frame =
+                                                        sent_bytes_this_frame.saturating_add(
+                                                            payload_len,
+                                                        );
                                                     h264_packets_sent =
                                                         h264_packets_sent.saturating_add(1);
                                                     if h264_packets_sent == 1
@@ -905,7 +940,7 @@ pub fn spawn_stream(
                                                             "media.codec_auto",
                                                             format!(
                                                                 "session_id={} fallback={} reason=h264_stdin_failed",
-                                                                session_id,
+                                                                encode_session_id,
                                                                 fallback.wire_name()
                                                             ),
                                                         );
@@ -923,19 +958,24 @@ pub fn spawn_stream(
                                             "INFO",
                                             "media.perf",
                                             format!(
-                                                "session_id={} codec=h264 encoder={} profile={} frame={} encode_ms={} packets={}",
-                                                session_id,
+                                                "session_id={} codec=h264 encoder={} profile={} backend={} frame={} capture_ms={} queue_ms={} encode_ms={} packets={} bytes={}",
+                                                encode_session_id,
                                                 best_encoder.codec_name(),
                                                 stream_profile.wire_name(),
+                                                frame.backend,
                                                 sent_frames,
+                                                frame.capture_ms,
+                                                queue_ms,
                                                 encode_ms,
-                                                sent_packets_this_frame
+                                                sent_packets_this_frame,
+                                                sent_bytes_this_frame
                                             ),
                                         );
                                     }
                                 }
                                 StreamCodec::Vp8 => {
                                     let mut sent_packets_this_frame = 0u64;
+                                    let mut sent_bytes_this_frame = 0usize;
                                     match ensure_vp8_encoder(
                                         &mut vp8_encoder,
                                         frame.width,
@@ -1010,6 +1050,11 @@ pub fn spawn_stream(
                                                                 sent_packets_this_frame =
                                                                     sent_packets_this_frame
                                                                         .saturating_add(1);
+                                                                sent_bytes_this_frame =
+                                                                    sent_bytes_this_frame
+                                                                        .saturating_add(
+                                                                            remainder.len(),
+                                                                        );
                                                             }
                                                             vp8_header_buffer.clear();
                                                         } else if send_vp8_frame_chunks(
@@ -1024,6 +1069,9 @@ pub fn spawn_stream(
                                                             sent_packets_this_frame =
                                                                 sent_packets_this_frame
                                                                     .saturating_add(1);
+                                                            sent_bytes_this_frame =
+                                                                sent_bytes_this_frame
+                                                                    .saturating_add(chunk.len());
                                                         }
                                                     }
                                                 } else {
@@ -1046,7 +1094,7 @@ pub fn spawn_stream(
                                                     "media.codec_auto",
                                                     format!(
                                                         "session_id={} fallback=h264 reason=vp8_start_failed",
-                                                        session_id
+                                                        encode_session_id
                                                     ),
                                                 );
                                                 continue;
@@ -1061,12 +1109,16 @@ pub fn spawn_stream(
                                             "INFO",
                                             "media.perf",
                                             format!(
-                                                "session_id={} codec=vp8 profile={} frame={} encode_ms={} packets={}",
-                                                session_id,
+                                                "session_id={} codec=vp8 profile={} backend={} frame={} capture_ms={} queue_ms={} encode_ms={} packets={} bytes={}",
+                                                encode_session_id,
                                                 stream_profile.wire_name(),
+                                                frame.backend,
                                                 sent_frames,
+                                                frame.capture_ms,
+                                                queue_ms,
                                                 encode_ms,
-                                                sent_packets_this_frame
+                                                sent_packets_this_frame,
+                                                sent_bytes_this_frame
                                             ),
                                         );
                                     }
