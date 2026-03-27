@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::{
     App, CreationContext, NativeOptions,
     egui::{
-        self, Align, Button, CentralPanel, Color32, Context, CornerRadius, Frame, Grid, Layout,
+        self, Align, Button, CentralPanel, Color32, Context, CornerRadius, Frame, Layout,
         RichText, ScrollArea, Sense, SidePanel, Stroke, TextEdit, TextureHandle, TopBottomPanel,
         Ui, Vec2, ViewportBuilder,
     },
@@ -68,17 +68,17 @@ impl HostState {
 
     fn tint(self) -> Color32 {
         match self {
-            Self::Online => Color32::from_rgb(64, 153, 86),
-            Self::Busy => Color32::from_rgb(47, 92, 141),
-            Self::Offline => Color32::from_rgb(150, 157, 166),
+            Self::Online => Color32::from_rgb(40, 140, 70),
+            Self::Busy => Color32::from_rgb(40, 90, 150),
+            Self::Offline => Color32::from_rgb(140, 148, 158),
         }
     }
 
     fn fill(self) -> Color32 {
         match self {
-            Self::Online => Color32::from_rgb(224, 241, 228),
-            Self::Busy => Color32::from_rgb(223, 232, 243),
-            Self::Offline => Color32::from_rgb(232, 236, 240),
+            Self::Online => Color32::from_rgb(220, 240, 225),
+            Self::Busy => Color32::from_rgb(218, 230, 245),
+            Self::Offline => Color32::from_rgb(230, 234, 240),
         }
     }
 }
@@ -367,6 +367,7 @@ struct ConsoleApp {
     login: String,
     password: String,
     search_query: String,
+    quick_connect_id: String,
     status_line: String,
     connection_note: String,
     access_token: Option<String>,
@@ -426,7 +427,8 @@ impl ConsoleApp {
             login: DEFAULT_OPERATOR_LOGIN.to_owned(),
             password: DEFAULT_OPERATOR_PASSWORD.to_owned(),
             search_query: String::new(),
-            status_line: "Консоль готова к работе. Выполняется автоматическое подключение к серверу BK-Wiver.".to_owned(),
+            quick_connect_id: String::new(),
+            status_line: "Готово к работе. Автоматическое подключение к серверу.".to_owned(),
             connection_note: "Сейчас используется демо-режим, пока консоль автоматически подключается к серверу BK-Wiver.".to_owned(),
             access_token: None,
             using_demo_data: true,
@@ -1093,24 +1095,24 @@ impl ConsoleApp {
     fn session_status_colors(session_state: &str) -> (Color32, Color32) {
         match session_state {
             "connected" => (
-                Color32::from_rgb(47, 120, 62),
-                Color32::from_rgb(224, 241, 228),
+                Color32::from_rgb(40, 120, 65),
+                Color32::from_rgb(220, 240, 225),
             ),
             "pending" => (
-                Color32::from_rgb(47, 92, 141),
-                Color32::from_rgb(223, 232, 243),
+                Color32::from_rgb(40, 95, 155),
+                Color32::from_rgb(218, 232, 248),
             ),
             "demo" => (
-                Color32::from_rgb(145, 102, 60),
-                Color32::from_rgb(245, 233, 219),
+                Color32::from_rgb(150, 110, 50),
+                Color32::from_rgb(248, 240, 225),
             ),
             "rejected" | "closed" => (
-                Color32::from_rgb(126, 82, 58),
-                Color32::from_rgb(241, 229, 219),
+                Color32::from_rgb(150, 80, 55),
+                Color32::from_rgb(248, 230, 222),
             ),
             _ => (
-                Color32::from_rgb(108, 115, 124),
-                Color32::from_rgb(232, 236, 240),
+                Color32::from_rgb(110, 118, 130),
+                Color32::from_rgb(232, 236, 242),
             ),
         }
     }
@@ -1147,15 +1149,15 @@ impl ConsoleApp {
         let image_rect = rect.shrink2(Vec2::new(8.0, 40.0));
 
         let fill = match session.state.as_str() {
-            "connected" => Color32::from_rgb(23, 31, 43),
-            "pending" => Color32::from_rgb(38, 49, 63),
-            "demo" => Color32::from_rgb(53, 45, 36),
-            "closed" | "rejected" => Color32::from_rgb(50, 50, 52),
-            _ => Color32::from_rgb(36, 40, 45),
+            "connected" => Color32::from_rgb(230, 235, 245),
+            "pending" => Color32::from_rgb(240, 243, 250),
+            "demo" => Color32::from_rgb(248, 245, 235),
+            "closed" | "rejected" => Color32::from_rgb(240, 238, 235),
+            _ => Color32::from_rgb(235, 238, 245),
         };
 
         let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(12), fill);
+        painter.rect_filled(rect, CornerRadius::same(8), fill);
         if let Some(texture) = &self.session_texture {
             painter.image(
                 texture.id(),
@@ -1169,8 +1171,8 @@ impl ConsoleApp {
         }
         painter.rect_stroke(
             rect,
-            CornerRadius::same(12),
-            Stroke::new(1.0, Color32::from_rgb(74, 86, 100)),
+            CornerRadius::same(8),
+            Stroke::new(1.0, Color32::from_rgb(200, 208, 218)),
             egui::StrokeKind::Inside,
         );
 
@@ -1178,77 +1180,77 @@ impl ConsoleApp {
         painter.rect_filled(
             header_rect,
             CornerRadius {
-                nw: 12,
-                ne: 12,
+                nw: 8,
+                ne: 8,
                 sw: 0,
                 se: 0,
             },
-            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 15),
         );
         painter.text(
             header_rect.center(),
             egui::Align2::CENTER_CENTER,
             "BK Remote Session",
-            egui::FontId::proportional(16.0),
-            Color32::from_rgb(229, 235, 241),
+            egui::FontId::proportional(15.0),
+            Color32::from_rgb(60, 72, 90),
         );
 
         let (accent, accent_fill) = Self::session_status_colors(&session.state);
         let status_rect = egui::Rect::from_center_size(
             if has_live_frame {
-                rect.left_top() + Vec2::new(120.0, 54.0)
+                rect.left_top() + Vec2::new(110.0, 52.0)
             } else {
-                rect.center_top() + Vec2::new(0.0, 88.0)
+                rect.center_top() + Vec2::new(0.0, 85.0)
             },
-            Vec2::new(220.0, 34.0),
+            Vec2::new(200.0, 30.0),
         );
-        painter.rect_filled(status_rect, CornerRadius::same(17), accent_fill);
+        painter.rect_filled(status_rect, CornerRadius::same(15), accent_fill);
         painter.text(
             status_rect.center(),
             egui::Align2::CENTER_CENTER,
             Self::session_status_label(&session.state),
-            egui::FontId::proportional(15.0),
+            egui::FontId::proportional(14.0),
             accent,
         );
 
         if has_live_frame {
             painter.text(
-                rect.left_top() + Vec2::new(26.0, 88.0),
+                rect.left_top() + Vec2::new(22.0, 82.0),
                 egui::Align2::LEFT_TOP,
-                format!("Хост: {}", session.target_host_name),
-                egui::FontId::proportional(18.0),
-                Color32::from_rgb(245, 248, 252),
+                &session.target_host_name,
+                egui::FontId::proportional(17.0),
+                Color32::from_rgb(40, 52, 70),
             );
         } else {
             painter.text(
-                rect.center_top() + Vec2::new(0.0, 138.0),
+                rect.center_top() + Vec2::new(0.0, 135.0),
                 egui::Align2::CENTER_CENTER,
                 &session.target_host_name,
-                egui::FontId::proportional(26.0),
-                Color32::from_rgb(245, 248, 252),
+                egui::FontId::proportional(24.0),
+                Color32::from_rgb(40, 52, 70),
             );
 
             painter.text(
                 rect.center_top() + Vec2::new(0.0, 172.0),
                 egui::Align2::CENTER_CENTER,
-                "Полотно удалённого экрана готово для медиапотока",
+                "Полотно удалённого экрана",
                 egui::FontId::proportional(15.0),
-                Color32::from_rgb(192, 202, 213),
+                Color32::from_rgb(120, 130, 148),
             );
 
             painter.text(
-                rect.center_top() + Vec2::new(0.0, 204.0),
+                rect.center_top() + Vec2::new(0.0, 205.0),
                 egui::Align2::CENTER_CENTER,
                 match session.state.as_str() {
-                    "connected" => "Ожидаем первые кадры со стороны Host.",
-                    "pending" => "Ожидаем подтверждение со стороны Host.",
-                    "demo" => "Работаем в локальном демонстрационном режиме.",
+                    "connected" => "Ожидаем первые кадры.",
+                    "pending" => "Ожидаем подтверждение хоста.",
+                    "demo" => "Локальный демонстрационный режим.",
                     "closed" => "Сеанс закрыт.",
                     "rejected" => "Подключение отклонено.",
-                    _ => "Ожидаем новое состояние сеанса.",
+                    _ => "Ожидаем состояние.",
                 },
                 egui::FontId::proportional(14.0),
-                Color32::from_rgb(170, 181, 193),
+                Color32::from_rgb(140, 148, 162),
             );
         }
 
@@ -1499,26 +1501,33 @@ impl ConsoleApp {
         };
 
         let mut open = true;
-        egui::Window::new("Окно сеанса")
+        egui::Window::new("Сеанс")
             .id(egui::Id::new("session_window"))
             .open(&mut open)
             .default_size(Vec2::new(1280.0, 820.0))
             .min_size(Vec2::new(920.0, 640.0))
             .resizable(true)
-            .show(ctx, |ui| {
+            .frame(
                 Frame::new()
-                    .fill(Color32::from_rgb(245, 247, 249))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(210, 216, 222)))
+                    .fill(Color32::from_rgb(248, 250, 254))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(210, 218, 228)))
                     .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(10))
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show(ctx, |ui| {
+                // Session header bar
+                Frame::new()
+                    .fill(Color32::from_rgb(240, 243, 248))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
                     .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.heading(
+                        ui.horizontal(|ui| {
+                            ui.label(
                                 RichText::new(&session.target_host_name)
+                                    .size(16.0)
                                     .strong()
-                                    .color(Color32::from_rgb(37, 54, 74)),
+                                    .color(Color32::from_rgb(35, 50, 72)),
                             );
-                            ui.add_space(8.0);
+                            ui.add_space(10.0);
                             let (status_tint, status_fill) =
                                 Self::session_status_colors(&session.state);
                             status_chip(
@@ -1527,136 +1536,191 @@ impl ConsoleApp {
                                 status_tint,
                                 status_fill,
                             );
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(format!("ID: {}", session.session_id))
+                                    .size(13.0)
+                                    .monospace()
+                                    .color(Color32::from_rgb(120, 130, 148)),
+                            );
                             ui.separator();
-                            ui.label(format!("Сеанс {}", session.session_id));
-                            ui.separator();
-                            ui.label(format!("Истекает {}", format_ms(session.expires_at_ms)));
-                            ui.separator();
-                            ui.label(if self.media_connected_session_id.as_deref()
-                                == Some(session.session_id.as_str())
-                            {
-                                "media подключён"
-                            } else {
-                                "media ожидает кадры"
+                            ui.label(
+                                RichText::new(format!(
+                                    "Истекает {}",
+                                    format_ms(session.expires_at_ms)
+                                ))
+                                .size(13.0)
+                                .color(Color32::from_rgb(120, 130, 148)),
+                            );
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                // Quality selector
+                                let previous_profile = self.stream_quality_profile;
+                                egui::ComboBox::from_id_salt("session_quality_profile")
+                                    .selected_text(
+                                        RichText::new(self.stream_quality_profile.label())
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(60, 72, 90)),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.stream_quality_profile,
+                                            StreamQualityProfile::Fast,
+                                            StreamQualityProfile::Fast.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.stream_quality_profile,
+                                            StreamQualityProfile::Balanced,
+                                            StreamQualityProfile::Balanced.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.stream_quality_profile,
+                                            StreamQualityProfile::Sharp,
+                                            StreamQualityProfile::Sharp.label(),
+                                        );
+                                    });
+
+                                // Codec selector
+                                let previous_codec = self.stream_codec_preference;
+                                egui::ComboBox::from_id_salt("session_codec_preference")
+                                    .selected_text(
+                                        RichText::new(self.stream_codec_preference.label())
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(60, 72, 90)),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.stream_codec_preference,
+                                            StreamCodecPreference::Auto,
+                                            StreamCodecPreference::Auto.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.stream_codec_preference,
+                                            StreamCodecPreference::H264,
+                                            StreamCodecPreference::H264.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.stream_codec_preference,
+                                            StreamCodecPreference::Vp8,
+                                            StreamCodecPreference::Vp8.label(),
+                                        );
+                                    });
+
+                                if self.stream_quality_profile != previous_profile
+                                    || self.stream_codec_preference != previous_codec
+                                {
+                                    self.sync_stream_profile(&session, "ui.change");
+                                }
                             });
-                            ui.separator();
-                            ui.label(match self.media_codec {
-                                Some(MediaCodec::H264) => "codec h264",
-                                Some(MediaCodec::Vp8) => "codec vp8",
-                                None => "codec неизвестен",
-                            });
-                            ui.separator();
-                            ui.label(format!("кадров {}", self.media_frame_count));
-                            ui.separator();
-                            ui.label(format!("изменилось {}", self.media_changed_frame_count));
-                            ui.separator();
-                            ui.label(if self.media_last_frame_at_ms == 0 {
-                                "последний кадр: нет".to_owned()
-                            } else {
-                                format!(
-                                    "последний кадр {} ({})",
-                                    format_clock(self.media_last_frame_at_ms),
-                                    format_frame_age(self.media_last_frame_at_ms)
-                                )
-                            });
-                            ui.separator();
-                            ui.label(if self.remote_input_captured {
-                                "ввод закреплён за сеансом, Esc отпускает"
-                            } else {
-                                "кликните по экрану для захвата ввода"
-                            });
-                            ui.separator();
-                            let previous_profile = self.stream_quality_profile;
-                            egui::ComboBox::from_id_salt("session_quality_profile")
-                                .selected_text(self.stream_quality_profile.label())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.stream_quality_profile,
-                                        StreamQualityProfile::Fast,
-                                        StreamQualityProfile::Fast.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_quality_profile,
-                                        StreamQualityProfile::Balanced,
-                                        StreamQualityProfile::Balanced.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_quality_profile,
-                                        StreamQualityProfile::Sharp,
-                                        StreamQualityProfile::Sharp.label(),
-                                    );
-                            });
-                            ui.separator();
-                            let previous_codec = self.stream_codec_preference;
-                            egui::ComboBox::from_id_salt("session_codec_preference")
-                                .selected_text(self.stream_codec_preference.label())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::Auto,
-                                        StreamCodecPreference::Auto.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::H264,
-                                        StreamCodecPreference::H264.label(),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.stream_codec_preference,
-                                        StreamCodecPreference::Vp8,
-                                        StreamCodecPreference::Vp8.label(),
-                                    );
-                                });
-                            if self.stream_quality_profile != previous_profile
-                                || self.stream_codec_preference != previous_codec
-                            {
-                                self.sync_stream_profile(&session, "ui.change");
-                            }
                         });
                     });
 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
+
+                // Remote view
                 let (response, image_rect) = self.remote_view_placeholder(ui, &session);
                 self.handle_remote_input(ctx, &session, &response, image_rect);
 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
+
+                // Session footer
                 Frame::new()
-                    .fill(Color32::from_rgb(245, 247, 249))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(210, 216, 222)))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(10))
+                    .fill(Color32::from_rgb(242, 245, 250))
+                    .inner_margin(egui::Margin::symmetric(14, 8))
                     .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
+                        ui.horizontal(|ui| {
+                            // Media stats
+                            ui.label(
+                                RichText::new(if self.media_connected_session_id.as_deref()
+                                    == Some(session.session_id.as_str())
+                                {
+                                    "●"
+                                } else {
+                                    "○"
+                                })
+                                .size(12.0)
+                                .color(if self.media_connected_session_id.is_some() {
+                                    Color32::from_rgb(40, 150, 70)
+                                } else {
+                                    Color32::from_rgb(140, 148, 158)
+                                }),
+                            );
                             ui.label(
                                 RichText::new(format!(
-                                    "{}. ID хоста: {}.",
-                                    Self::session_stage_note(&session.state),
-                                    session.target_host_id
+                                    "кадров: {} | изм: {} | codec: {}",
+                                    self.media_frame_count,
+                                    self.media_changed_frame_count,
+                                    match self.media_codec {
+                                        Some(MediaCodec::H264) => "h264",
+                                        Some(MediaCodec::Vp8) => "vp8",
+                                        None => "—",
+                                    }
                                 ))
-                                .color(Color32::from_rgb(79, 90, 101)),
+                                .size(13.0)
+                                .color(Color32::from_rgb(100, 110, 128)),
                             );
+
                             ui.add_space(10.0);
-                            let close_enabled =
-                                !matches!(session.state.as_str(), "closed" | "rejected");
-                            if ui
-                                .add_enabled(close_enabled, action_button_widget("Завершить"))
-                                .clicked()
-                            {
-                                self.close_session();
-                            }
-                            if ui.button("Скрыть окно").clicked() {
-                                self.show_session_window = false;
-                                self.remote_input_captured = false;
-                                self.remote_pointer_button_down = None;
-                                self.last_remote_pointer_pos = None;
-                                if let Some(token) = self.access_token.clone() {
-                                    self.send_remote_input_reset(
-                                        &normalize_server_url(&self.server_url),
-                                        &token,
-                                        &session.session_id,
-                                    );
+                            ui.label(
+                                RichText::new(if self.remote_input_captured {
+                                    "Ввод захвачен · Esc отпускает"
+                                } else {
+                                    "Кликните для захвата ввода"
+                                })
+                                .size(13.0)
+                                .color(if self.remote_input_captured {
+                                    Color32::from_rgb(180, 130, 40)
+                                } else {
+                                    Color32::from_rgb(120, 130, 148)
+                                }),
+                            );
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .add_sized(
+                                        [90.0, 28.0],
+                                        Button::new(
+                                            RichText::new("Скрыть")
+                                                .size(13.0)
+                                                .color(Color32::from_rgb(60, 72, 90)),
+                                        )
+                                        .fill(Color32::from_rgb(230, 235, 242))
+                                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 208, 218))),
+                                    )
+                                    .clicked()
+                                {
+                                    self.show_session_window = false;
+                                    self.remote_input_captured = false;
+                                    self.remote_pointer_button_down = None;
+                                    self.last_remote_pointer_pos = None;
+                                    if let Some(token) = self.access_token.clone() {
+                                        self.send_remote_input_reset(
+                                            &normalize_server_url(&self.server_url),
+                                            &token,
+                                            &session.session_id,
+                                        );
+                                    }
                                 }
-                            }
+
+                                let close_enabled =
+                                    !matches!(session.state.as_str(), "closed" | "rejected");
+                                if ui
+                                    .add_enabled(
+                                        close_enabled,
+                                        Button::new(
+                                            RichText::new("Завершить")
+                                                .size(13.0)
+                                                .color(Color32::from_rgb(180, 70, 50)),
+                                        )
+                                        .fill(Color32::from_rgb(252, 235, 230))
+                                        .stroke(Stroke::new(1.0, Color32::from_rgb(220, 180, 170)))
+                                        .min_size(Vec2::new(90.0, 28.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.close_session();
+                                }
+                            });
                         });
                     });
             });
@@ -1680,101 +1744,105 @@ impl ConsoleApp {
         TopBottomPanel::top("top_bar")
             .frame(
                 Frame::new()
-                    .fill(Color32::from_rgb(231, 236, 241))
-                    .inner_margin(egui::Margin::same(10))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(188, 197, 206))),
+                    .fill(Color32::from_rgb(0, 120, 212))
+                    .inner_margin(egui::Margin::symmetric(16, 10)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(app_brand_name())
-                            .size(22.0)
+                            .size(20.0)
                             .strong()
-                            .color(Color32::from_rgb(37, 54, 74)),
+                            .color(Color32::WHITE),
                     );
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new(app_build_label())
+                            .size(12.0)
                             .monospace()
-                            .color(Color32::from_rgb(108, 118, 128)),
+                            .color(Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
                     );
-                    ui.add_space(12.0);
-                    if menu_button(ui, self.tr(TextKey::Connect)).clicked() {
-                        self.request_session(false);
-                    }
-                    if menu_button(ui, self.tr(TextKey::Refresh)).clicked() {
-                        self.refresh_devices();
-                    }
-                    let _ = menu_button(ui, self.tr(TextKey::Properties));
-                    let _ = menu_button(ui, "Wake-on-LAN");
-                    let _ = menu_button(ui, self.tr(TextKey::Statistics));
-                    let _ = menu_button(ui, self.tr(TextKey::Tools));
-                    if menu_button(ui, "Сохранить лог").clicked() {
-                        self.status_line = match logging::export_diagnostic_report(&self.status_line)
-                        {
-                            Ok(path) => {
-                                logging::append_log(
-                                    "INFO",
-                                    "console.log_export",
-                                    format!("saved_to={}", path.display()),
-                                );
-                                format!("Лог сохранён: {}", path.display())
-                            }
-                            Err(error) => {
-                                logging::append_log("ERROR", "console.log_export", &error);
-                                format!("Не удалось сохранить лог: {error}")
-                            }
-                        };
-                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let search_hint = self.tr(TextKey::SearchHosts);
-                        let response = ui.add(
-                            TextEdit::singleline(&mut self.search_query)
-                                .hint_text(search_hint)
-                                .desired_width(240.0),
-                        );
-                        if response.changed() {
-                            self.ensure_selection_visible();
-                        }
-
-                        let label = if self.using_demo_data {
-                            self.tr(TextKey::DemoProfile)
-                        } else if self.signed_in() {
-                            self.tr(TextKey::SignedIn)
-                        } else {
-                            self.tr(TextKey::Offline)
-                        };
-
-                        let (tint, fill) = if self.using_demo_data {
-                            (
-                                Color32::from_rgb(145, 102, 60),
-                                Color32::from_rgb(245, 233, 219),
-                            )
-                        } else {
-                            (
-                                Color32::from_rgb(78, 136, 82),
-                                Color32::from_rgb(222, 240, 225),
-                            )
-                        };
-                        status_chip(ui, label, tint, fill);
+                        // Language
                         if ui
-                            .selectable_label(
-                                self.language == AppLanguage::Ru,
-                                AppLanguage::Ru.code(),
+                            .add(
+                                Button::new(
+                                    RichText::new("EN")
+                                        .size(13.0)
+                                        .color(if self.language == AppLanguage::En {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+                                        }),
+                                )
+                                .fill(if self.language == AppLanguage::En {
+                                    Color32::from_rgb(0, 90, 170)
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            self.set_language(AppLanguage::En);
+                        }
+                        if ui
+                            .add(
+                                Button::new(
+                                    RichText::new("RU")
+                                        .size(13.0)
+                                        .color(if self.language == AppLanguage::Ru {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+                                        }),
+                                )
+                                .fill(if self.language == AppLanguage::Ru {
+                                    Color32::from_rgb(0, 90, 170)
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(Stroke::NONE),
                             )
                             .clicked()
                         {
                             self.set_language(AppLanguage::Ru);
                         }
-                        if ui
-                            .selectable_label(
-                                self.language == AppLanguage::En,
-                                AppLanguage::En.code(),
-                            )
-                            .clicked()
-                        {
-                            self.set_language(AppLanguage::En);
+
+                        ui.add_space(16.0);
+
+                        // Status
+                        let (status_text, status_color) = if self.using_demo_data {
+                            ("Demo", Color32::from_rgb(255, 200, 50))
+                        } else if self.signed_in() {
+                            ("Online", Color32::from_rgb(100, 255, 100))
+                        } else {
+                            ("Offline", Color32::from_rgb(255, 100, 100))
+                        };
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, status_color);
+                        ui.label(
+                            RichText::new(status_text)
+                                .size(13.0)
+                                .color(Color32::from_rgba_unmultiplied(255, 255, 255, 200)),
+                        );
+
+                        ui.add_space(16.0);
+
+                        // Search
+                        let search_hint = self.tr(TextKey::SearchHosts).to_owned();
+                        let response = ui.add(
+                            TextEdit::singleline(&mut self.search_query)
+                                .hint_text(
+                                    RichText::new(search_hint)
+                                        .size(13.0)
+                                        .color(Color32::from_rgba_unmultiplied(255, 255, 255, 120)),
+                                )
+                                .desired_width(200.0),
+                        );
+                        if response.changed() {
+                            self.ensure_selection_visible();
                         }
                     });
                 });
@@ -1785,21 +1853,26 @@ impl ConsoleApp {
         TopBottomPanel::bottom("status_bar")
             .frame(
                 Frame::new()
-                    .fill(Color32::from_rgb(238, 242, 246))
-                    .inner_margin(egui::Margin::same(8))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(190, 197, 205))),
+                    .fill(Color32::from_rgb(240, 242, 248))
+                    .inner_margin(egui::Margin::symmetric(16, 6)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(self.tr(TextKey::Ready)).strong());
-                    ui.separator();
-                    ui.label(&self.status_line);
+                    ui.label(
+                        RichText::new(&self.status_line)
+                            .size(12.0)
+                            .color(Color32::from_rgb(100, 110, 128)),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(format!(
-                            "{}: {}",
-                            self.tr(TextKey::HostsCount),
-                            self.filtered_host_indices().len()
-                        ));
+                        ui.label(
+                            RichText::new(format!(
+                                "{}: {}",
+                                self.tr(TextKey::HostsCount),
+                                self.filtered_host_indices().len()
+                            ))
+                            .size(12.0)
+                            .color(Color32::from_rgb(140, 148, 160)),
+                        );
                     });
                 });
             });
@@ -1808,87 +1881,174 @@ impl ConsoleApp {
     fn left_panel(&mut self, ctx: &Context) {
         SidePanel::left("nav_panel")
             .resizable(true)
-            .default_width(250.0)
-            .width_range(220.0..=320.0)
+            .default_width(240.0)
+            .width_range(200.0..=300.0)
             .frame(
                 Frame::new()
-                    .fill(Color32::from_rgb(244, 247, 250))
-                    .inner_margin(egui::Margin::same(10)),
+                    .fill(Color32::from_rgb(242, 245, 250))
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
             )
             .show(ctx, |ui| {
-                panel_title(ui, self.tr(TextKey::Connection));
-                inspector_card(ui, |ui| {
-                    labeled_edit(ui, self.tr(TextKey::Server), &mut self.server_url, false);
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_sized(
-                                [92.0, 28.0],
-                                Button::new(if self.signed_in() {
+                // Server connection
+                ui.label(
+                    RichText::new(self.tr(TextKey::Server))
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::from_rgb(60, 72, 90)),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    TextEdit::singleline(&mut self.server_url)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace.resolve(ui.style())),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized(
+                            [72.0, 30.0],
+                            Button::new(
+                                RichText::new(if self.signed_in() {
                                     self.tr(TextKey::Reconnect)
                                 } else {
                                     self.tr(TextKey::SignIn)
-                                }),
-                            )
-                            .clicked()
-                        {
-                            self.sign_in();
+                                })
+                                .size(14.0),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.sign_in();
+                    }
+                    if ui
+                        .add_sized(
+                            [68.0, 30.0],
+                            Button::new(
+                                RichText::new(self.tr(TextKey::Refresh)).size(14.0),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.refresh_devices();
+                    }
+                    if ui
+                        .add_sized(
+                            [64.0, 30.0],
+                            Button::new(RichText::new(self.tr(TextKey::Demo)).size(14.0)),
+                        )
+                        .clicked()
+                    {
+                        self.switch_to_demo_mode();
+                    }
+                });
+
+                ui.add_space(16.0);
+                ui.add_space(12.0);
+
+                // Groups
+                ui.label(
+                    RichText::new(self.tr(TextKey::AddressBook))
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::from_rgb(60, 72, 90)),
+                );
+                ui.add_space(6.0);
+
+                // Online filter
+                let show_only_online_label = self.tr(TextKey::ShowOnlyOnline).to_owned();
+                ui.checkbox(
+                    &mut self.show_only_online,
+                    RichText::new(show_only_online_label)
+                        .size(14.0)
+                        .color(Color32::from_rgb(80, 90, 108)),
+                );
+                ui.add_space(8.0);
+
+                // Groups list
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        let mut clicked_group = None;
+                        for (index, group) in self.nav_groups.iter().enumerate() {
+                            let selected = self.active_group == index;
+                            let bg = if selected {
+                                Color32::from_rgb(200, 218, 245)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+
+                            let response = Frame::new()
+                                .fill(bg)
+                                .corner_radius(CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&group.title)
+                                                .size(15.0)
+                                                .color(if selected {
+                                                    Color32::from_rgb(30, 55, 100)
+                                                } else {
+                                                    Color32::from_rgb(60, 70, 88)
+                                                }),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{}/{}",
+                                                        group.online, group.total
+                                                    ))
+                                                    .size(13.0)
+                                                    .color(if selected {
+                                                        Color32::from_rgb(50, 80, 140)
+                                                    } else {
+                                                        Color32::from_rgb(120, 130, 148)
+                                                    }),
+                                                );
+                                            },
+                                        );
+                                    });
+                                })
+                                .response
+                                .interact(Sense::click());
+
+                            if response.clicked() {
+                                clicked_group = Some(index);
+                            }
                         }
-                        if ui
-                            .add_sized([80.0, 28.0], Button::new(self.tr(TextKey::Refresh)))
-                            .clicked()
-                        {
-                            self.refresh_devices();
-                        }
-                        if ui
-                            .add_sized([88.0, 28.0], Button::new(self.tr(TextKey::Demo)))
-                            .clicked()
-                        {
-                            self.switch_to_demo_mode();
+
+                        if let Some(index) = clicked_group {
+                            self.active_group = index;
+                            self.ensure_selection_visible();
                         }
                     });
-                });
 
-                ui.add_space(10.0);
-                panel_title(ui, self.tr(TextKey::AddressBook));
-                inspector_card(ui, |ui| {
-                    let show_only_online_label = self.tr(TextKey::ShowOnlyOnline);
-                    ui.checkbox(&mut self.show_only_online, show_only_online_label);
-                    ui.add_space(8.0);
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(330.0)
-                        .show(ui, |ui| {
-                            let mut clicked_group = None;
-                            for (index, group) in self.nav_groups.iter().enumerate() {
-                                let selected = self.active_group == index;
-                                let label =
-                                    format!("{}   {} / {}", group.title, group.online, group.total);
-                                let response = ui.selectable_label(selected, label);
-                                if response.clicked() {
-                                    clicked_group = Some(index);
-                                }
-                            }
+                ui.add_space(12.0);
+                ui.add_space(12.0);
 
-                            if let Some(index) = clicked_group {
-                                self.active_group = index;
-                                self.ensure_selection_visible();
-                            }
-                        });
-                });
-
-                ui.add_space(10.0);
-                panel_title(ui, self.tr(TextKey::Activity));
-                inspector_card(ui, |ui| {
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(180.0)
-                        .show(ui, |ui| {
-                            for item in &self.activity_log {
-                                ui.label(item);
-                            }
-                        });
-                });
+                // Activity
+                ui.label(
+                    RichText::new(self.tr(TextKey::Activity))
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::from_rgb(60, 72, 90)),
+                );
+                ui.add_space(6.0);
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for item in &self.activity_log {
+                            ui.label(
+                                RichText::new(item)
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(100, 110, 128)),
+                            );
+                        }
+                    });
             });
     }
 
@@ -1896,18 +2056,328 @@ impl ConsoleApp {
         CentralPanel::default()
             .frame(
                 Frame::new()
-                    .fill(Color32::from_rgb(248, 250, 252))
-                    .inner_margin(egui::Margin::same(10)),
+                    .fill(Color32::from_rgb(240, 242, 245))
+                    .inner_margin(egui::Margin::same(0)),
             )
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    self.summary_strip(ui);
-                    ui.add_space(10.0);
+                    // Quick connect bar
+                    Frame::new()
+                        .fill(Color32::WHITE)
+                        .inner_margin(egui::Margin::symmetric(20, 14))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(self.tr(TextKey::Connect))
+                                        .size(16.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(40, 50, 65)),
+                                );
+                                ui.add_space(12.0);
+                                let hint = format!("{} (000 000 000)", self.tr(TextKey::HostId));
+                                ui.add(
+                                    TextEdit::singleline(&mut self.quick_connect_id)
+                                        .hint_text(
+                                            RichText::new(hint)
+                                                .size(14.0)
+                                                .color(Color32::from_rgb(170, 178, 190)),
+                                        )
+                                        .desired_width(200.0)
+                                        .font(egui::TextStyle::Monospace.resolve(ui.style())),
+                                );
+                                ui.add_space(8.0);
 
-                    ui.columns(2, |columns| {
-                        self.host_table(&mut columns[0]);
-                        self.host_details(&mut columns[1]);
-                    });
+                                let btn = ui.add_sized(
+                                    [120.0, 34.0],
+                                    Button::new(
+                                        RichText::new(self.tr(TextKey::Connect))
+                                            .size(14.0)
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(Color32::from_rgb(0, 120, 212)),
+                                );
+
+                                if btn.clicked() {
+                                    let id = self.quick_connect_id.trim().to_owned();
+                                    if !id.is_empty() {
+                                        if let Some(idx) = self.hosts.iter().position(|h| {
+                                            h.id.replace(' ', "") == id.replace(' ', "")
+                                        }) {
+                                            self.selected_host = idx;
+                                            self.request_session(false);
+                                        } else {
+                                            self.status_line =
+                                                format!("Хост с ID {} не найден.", id);
+                                        }
+                                    }
+                                }
+                            });
+                        });
+
+                    // Server bar
+                    Frame::new()
+                        .fill(Color32::from_rgb(248, 249, 252))
+                        .inner_margin(egui::Margin::symmetric(20, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(self.tr(TextKey::Server))
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(120, 130, 145)),
+                                );
+                                ui.add(
+                                    TextEdit::singleline(&mut self.server_url)
+                                        .desired_width(250.0)
+                                        .font(egui::TextStyle::Monospace.resolve(ui.style())),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .add_sized(
+                                        [80.0, 28.0],
+                                        Button::new(
+                                            RichText::new(if self.signed_in() {
+                                                self.tr(TextKey::Reconnect)
+                                            } else {
+                                                self.tr(TextKey::SignIn)
+                                            })
+                                            .size(13.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.sign_in();
+                                }
+                                if ui
+                                    .add_sized(
+                                        [72.0, 28.0],
+                                        Button::new(
+                                            RichText::new(self.tr(TextKey::Refresh))
+                                                .size(13.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.refresh_devices();
+                                }
+                                if ui
+                                    .add_sized(
+                                        [68.0, 28.0],
+                                        Button::new(
+                                            RichText::new(self.tr(TextKey::Demo)).size(13.0),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.switch_to_demo_mode();
+                                }
+                            });
+                        });
+
+                    ui.add_space(8.0);
+
+                    // Devices list
+                    self.devices_list(ui);
+                });
+            });
+    }
+
+    fn devices_list(&mut self, ui: &mut Ui) {
+        let filtered = self.filtered_host_indices();
+
+        if filtered.is_empty() {
+            let w = ui.available_width();
+            let _ = ui.allocate_ui_with_layout(
+                Vec2::new(w, 200.0),
+                Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    ui.label(
+                        RichText::new(self.tr(TextKey::NoHosts))
+                            .size(16.0)
+                            .color(Color32::from_rgb(150, 158, 170)),
+                    );
+                },
+            );
+            return;
+        }
+
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for host_index in &filtered {
+                    let host = &self.hosts[*host_index];
+                    let selected = self.selected_host == *host_index;
+
+                    let bg = if selected {
+                        Color32::from_rgb(230, 240, 255)
+                    } else {
+                        Color32::WHITE
+                    };
+
+                    let response = Frame::new()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::symmetric(20, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                // Status dot
+                                let (dot_r, _) =
+                                    ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    dot_r.center(),
+                                    6.0,
+                                    host.state.tint(),
+                                );
+                                ui.add_space(10.0);
+
+                                // Name and info
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&host.name)
+                                                .size(16.0)
+                                                .strong()
+                                                .color(Color32::from_rgb(35, 45, 60)),
+                                        );
+                                        ui.add_space(8.0);
+                                        status_chip(
+                                            ui,
+                                            host.state.label(),
+                                            host.state.tint(),
+                                            host.state.fill(),
+                                        );
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {} · {}",
+                                            host.id, host.endpoint, host.os
+                                        ))
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(120, 130, 148)),
+                                    );
+                                });
+
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(&host.last_seen)
+                                            .size(12.0)
+                                            .color(Color32::from_rgb(150, 158, 170)),
+                                    );
+                                });
+                            });
+                        })
+                        .response
+                        .interact(Sense::click());
+
+                    if response.hovered() && !selected {
+                        ui.painter().rect_filled(
+                            response.rect,
+                            CornerRadius::same(2),
+                            Color32::from_rgb(240, 245, 252),
+                        );
+                    }
+
+                    if response.clicked() {
+                        self.selected_host = *host_index;
+                        self.status_line = format!(
+                            "{} {} ({})",
+                            self.tr(TextKey::SelectedHost),
+                            host.name,
+                            host.id
+                        );
+                    }
+
+                    if response.double_clicked() {
+                        self.request_session(false);
+                    }
+
+                    ui.separator();
+                }
+            });
+    }
+
+    fn quick_connect_bar(&mut self, ui: &mut Ui) {
+        Frame::new()
+            .fill(Color32::from_rgb(242, 245, 250))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(210, 218, 228)))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("ID")
+                            .size(15.0)
+                            .strong()
+                            .color(Color32::from_rgb(50, 62, 80)),
+                    );
+                    ui.add_space(8.0);
+                    ui.add(
+                        TextEdit::singleline(&mut self.quick_connect_id)
+                            .hint_text(
+                                RichText::new("000 000 000")
+                                    .size(14.0)
+                                    .color(Color32::from_rgb(160, 168, 180)),
+                            )
+                            .desired_width(180.0)
+                            .font(egui::TextStyle::Monospace.resolve(ui.style())),
+                    );
+                    ui.add_space(8.0);
+
+                    let connect_btn = ui.add_sized(
+                        [130.0, 32.0],
+                        Button::new(
+                            RichText::new(self.tr(TextKey::Connect))
+                                .size(15.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(50, 100, 180)),
+                    );
+
+                    if connect_btn.clicked() {
+                        let id = self.quick_connect_id.trim().to_owned();
+                        if !id.is_empty() {
+                            if let Some(host_index) = self
+                                .hosts
+                                .iter()
+                                .position(|h| h.id.replace(' ', "") == id.replace(' ', ""))
+                            {
+                                self.selected_host = host_index;
+                                self.request_session(false);
+                            } else {
+                                self.status_line =
+                                    format!("Хост с ID {} не найден.", id);
+                            }
+                        }
+                    }
+
+                    ui.add_space(8.0);
+
+                    let view_btn = ui.add_sized(
+                        [110.0, 32.0],
+                        Button::new(
+                            RichText::new(self.tr(TextKey::View))
+                                .size(15.0)
+                                .color(Color32::from_rgb(60, 72, 90)),
+                        )
+                        .fill(Color32::from_rgb(230, 235, 242))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 208, 218))),
+                    );
+
+                    if view_btn.clicked() {
+                        let id = self.quick_connect_id.trim().to_owned();
+                        if !id.is_empty() {
+                            if let Some(host_index) = self
+                                .hosts
+                                .iter()
+                                .position(|h| h.id.replace(' ', "") == id.replace(' ', ""))
+                            {
+                                self.selected_host = host_index;
+                                self.request_session(true);
+                            } else {
+                                self.status_line =
+                                    format!("Хост с ID {} не найден.", id);
+                            }
+                        }
+                    }
                 });
             });
     }
@@ -1946,47 +2416,141 @@ impl ConsoleApp {
     }
 
     fn host_table(&mut self, ui: &mut Ui) {
-        panel_title(ui, self.tr(TextKey::Hosts));
         Frame::new()
             .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, Color32::from_rgb(194, 201, 208)))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(210, 218, 228)))
             .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(8))
+            .inner_margin(egui::Margin::same(0))
             .show(ui, |ui| {
                 let filtered = self.filtered_host_indices();
-                table_header(ui, self.language);
+
+                // Table header
+                Frame::new()
+                    .fill(Color32::from_rgb(240, 243, 248))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            column_text(
+                                ui,
+                                "",
+                                18.0,
+                                true,
+                                Color32::from_rgb(120, 130, 148),
+                            );
+                            column_text(
+                                ui,
+                                self.tr(TextKey::Computer),
+                                200.0,
+                                true,
+                                Color32::from_rgb(50, 62, 80),
+                            );
+                            column_text(
+                                ui,
+                                "ID",
+                                120.0,
+                                true,
+                                Color32::from_rgb(50, 62, 80),
+                            );
+                            column_text(
+                                ui,
+                                self.tr(TextKey::Endpoint),
+                                180.0,
+                                true,
+                                Color32::from_rgb(50, 62, 80),
+                            );
+                            column_text(
+                                ui,
+                                self.tr(TextKey::Platform),
+                                150.0,
+                                true,
+                                Color32::from_rgb(50, 62, 80),
+                            );
+                            column_text(
+                                ui,
+                                self.tr(TextKey::ActivityShort),
+                                110.0,
+                                true,
+                                Color32::from_rgb(50, 62, 80),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(self.tr(TextKey::State))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(50, 62, 80)),
+                                );
+                            });
+                        });
+                    });
+
                 ui.separator();
 
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .max_height(560.0)
                     .show(ui, |ui| {
                         if filtered.is_empty() {
                             empty_state(ui, self.tr(TextKey::NoHosts));
                             return;
                         }
 
-                        for host_index in filtered {
-                            let host = &self.hosts[host_index];
-                            let selected = self.selected_host == host_index;
-                            let row_fill = if selected {
-                                Color32::from_rgb(217, 229, 243)
+                        for host_index in &filtered {
+                            let host = &self.hosts[*host_index];
+                            let selected = self.selected_host == *host_index;
+
+                            let row_bg = if selected {
+                                Color32::from_rgb(210, 225, 248)
                             } else {
-                                Color32::WHITE
+                                Color32::TRANSPARENT
                             };
 
+                            let hover_bg = Color32::from_rgb(235, 240, 250);
+
                             let response = Frame::new()
-                                .fill(row_fill)
-                                .stroke(Stroke::new(1.0, Color32::from_rgb(227, 232, 236)))
-                                .corner_radius(CornerRadius::same(4))
-                                .inner_margin(egui::Margin::symmetric(8, 6))
+                                .fill(row_bg)
+                                .inner_margin(egui::Margin::symmetric(12, 7))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         state_dot(ui, host.state);
-                                        column_text(ui, &host.name, 160.0, true);
-                                        column_text(ui, &host.id, 92.0, false);
-                                        column_text(ui, &host.endpoint, 180.0, false);
-                                        column_text(ui, &host.last_seen, 110.0, false);
+                                        column_text(
+                                            ui,
+                                            &host.name,
+                                            200.0,
+                                            true,
+                                            if selected {
+                                                Color32::from_rgb(30, 50, 90)
+                                            } else {
+                                                Color32::from_rgb(40, 52, 70)
+                                            },
+                                        );
+                                        column_text(
+                                            ui,
+                                            &host.id,
+                                            120.0,
+                                            false,
+                                            Color32::from_rgb(100, 110, 128),
+                                        );
+                                        column_text(
+                                            ui,
+                                            &host.endpoint,
+                                            180.0,
+                                            false,
+                                            Color32::from_rgb(100, 110, 128),
+                                        );
+                                        column_text(
+                                            ui,
+                                            &host.os,
+                                            150.0,
+                                            false,
+                                            Color32::from_rgb(100, 110, 128),
+                                        );
+                                        column_text(
+                                            ui,
+                                            &host.last_seen,
+                                            110.0,
+                                            false,
+                                            Color32::from_rgb(100, 110, 128),
+                                        );
                                         ui.with_layout(
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
@@ -2003,8 +2567,16 @@ impl ConsoleApp {
                                 .response
                                 .interact(Sense::click());
 
+                            if response.hovered() && !selected {
+                                ui.painter().rect_filled(
+                                    response.rect,
+                                    CornerRadius::same(2),
+                                    hover_bg,
+                                );
+                            }
+
                             if response.clicked() {
-                                self.selected_host = host_index;
+                                self.selected_host = *host_index;
                                 self.status_line = format!(
                                     "{} {} ({})",
                                     self.tr(TextKey::SelectedHost),
@@ -2012,119 +2584,159 @@ impl ConsoleApp {
                                     host.id
                                 );
                             }
-                            ui.add_space(4.0);
+
+                            if response.double_clicked() {
+                                self.request_session(false);
+                            }
                         }
                     });
             });
     }
 
-    fn host_details(&mut self, ui: &mut Ui) {
-        panel_title(ui, self.tr(TextKey::SelectedHost));
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, Color32::from_rgb(194, 201, 208)))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
+    fn host_details(&mut self, ctx: &Context) {
+        SidePanel::right("details_panel")
+            .resizable(true)
+            .default_width(300.0)
+            .width_range(260.0..=380.0)
+            .frame(
+                Frame::new()
+                    .fill(Color32::WHITE)
+                    .inner_margin(egui::Margin::symmetric(16, 14)),
+            )
+            .show_animated(ctx, self.selected_host().is_some(), |ui| {
                 if let Some(host) = self.selected_host().cloned() {
+                    // Header
                     ui.horizontal(|ui| {
-                        ui.heading(&host.name);
-                        ui.add_space(6.0);
-                        status_chip(ui, host.state.label(), host.state.tint(), host.state.fill());
+                        ui.label(
+                            RichText::new(&host.name)
+                                .size(20.0)
+                                .strong()
+                                .color(Color32::from_rgb(35, 45, 60)),
+                        );
                     });
-                    ui.label(RichText::new(&host.note).color(Color32::from_rgb(79, 90, 101)));
-                    ui.add_space(10.0);
-
-                    Grid::new("host_details_grid")
-                        .num_columns(2)
-                        .spacing([12.0, 10.0])
-                        .show(ui, |ui| {
-                            detail_row(ui, self.tr(TextKey::HostId), &host.id);
-                            detail_row(ui, self.tr(TextKey::ConnectCode), &host.connect_code);
-                            detail_row(ui, self.tr(TextKey::Group), &host.group);
-                            detail_row(ui, self.tr(TextKey::Endpoint), &host.endpoint);
-                            detail_row(ui, self.tr(TextKey::Platform), &host.os);
-                            detail_row(ui, self.tr(TextKey::Owner), &host.owner);
-                            detail_row(ui, self.tr(TextKey::LastSeen), &host.last_seen);
-                            detail_row(
-                                ui,
-                                self.tr(TextKey::SessionPolicy),
-                                if host.permissions.input_control {
-                                    self.tr(TextKey::InteractiveControlAllowed)
-                                } else {
-                                    self.tr(TextKey::ViewOnlyRestricted)
-                                },
-                            );
-                        });
-
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(12.0);
-
-                    ui.horizontal_wrapped(|ui| {
-                        if action_button(ui, self.tr(TextKey::Connect)).clicked() {
-                            self.request_session(false);
-                        }
-                        if action_button(ui, self.tr(TextKey::View)).clicked() {
-                            self.request_session(true);
-                        }
-                        if action_button(ui, "Завершить").clicked() {
-                            self.close_session();
-                        }
-                        if action_button(ui, self.tr(TextKey::Files)).clicked() {
-                            self.status_line = format!(
-                                "Открыта рабочая область передачи файлов для {}.",
-                                host.name
-                            );
-                            self.add_activity(format!(
-                                "Открыт раздел передачи файлов для {}",
-                                host.name
-                            ));
-                        }
-                        if action_button(ui, self.tr(TextKey::CopyId)).clicked() {
-                            ui.ctx().copy_text(host.id.clone());
-                            self.status_line =
-                                format!("ID хоста {} скопирован в буфер обмена.", host.id);
-                        }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        status_chip(
+                            ui,
+                            host.state.label(),
+                            host.state.tint(),
+                            host.state.fill(),
+                        );
                     });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(&host.note)
+                            .size(13.0)
+                            .color(Color32::from_rgb(120, 130, 148)),
+                    );
+                    ui.add_space(14.0);
 
-                    ui.add_space(16.0);
-                    subpanel(ui, self.tr(TextKey::Permissions), |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            permission_chip(
-                                ui,
-                                self.tr(TextKey::Screen),
-                                host.permissions.screen_capture,
-                            );
-                            permission_chip(
-                                ui,
-                                self.tr(TextKey::Input),
-                                host.permissions.input_control,
-                            );
-                            permission_chip(
-                                ui,
-                                self.tr(TextKey::Access),
-                                host.permissions.accessibility,
-                            );
-                            permission_chip(
-                                ui,
-                                self.tr(TextKey::Files),
-                                host.permissions.file_transfer,
-                            );
-                        });
-                    });
+                    // Details
+                    ui.label(
+                        RichText::new("Информация")
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(60, 72, 90)),
+                    );
+                    ui.add_space(6.0);
 
-                    ui.add_space(10.0);
-                    subpanel(ui, self.tr(TextKey::OperatorNotes), |ui| {
-                        ui.label(&host.note);
-                        if self.using_demo_data {
-                            ui.label(self.tr(TextKey::DemoRecordNote));
-                        } else {
-                            ui.label(self.tr(TextKey::LiveRecordNote));
-                        }
-                    });
-                } else {
-                    empty_state(ui, self.tr(TextKey::SelectHostPrompt));
+                    detail_row(ui, self.tr(TextKey::HostId), &host.id);
+                    detail_row(ui, self.tr(TextKey::ConnectCode), &host.connect_code);
+                    detail_row(ui, self.tr(TextKey::Group), &host.group);
+                    detail_row(ui, self.tr(TextKey::Endpoint), &host.endpoint);
+                    detail_row(ui, self.tr(TextKey::Platform), &host.os);
+                    detail_row(ui, self.tr(TextKey::Owner), &host.owner);
+                    detail_row(ui, self.tr(TextKey::LastSeen), &host.last_seen);
+
+                    ui.add_space(14.0);
+
+                    // Actions
+                    ui.label(
+                        RichText::new("Действия")
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(60, 72, 90)),
+                    );
+                    ui.add_space(6.0);
+
+                    let w = ui.available_width();
+
+                    let btn = ui.add_sized(
+                        [w, 36.0],
+                        Button::new(
+                            RichText::new(self.tr(TextKey::Connect))
+                                .size(15.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(0, 120, 212)),
+                    );
+                    if btn.clicked() {
+                        self.request_session(false);
+                    }
+
+                    let btn = ui.add_sized(
+                        [w, 36.0],
+                        Button::new(
+                            RichText::new(self.tr(TextKey::View))
+                                .size(15.0)
+                                .color(Color32::from_rgb(60, 72, 90)),
+                        )
+                        .fill(Color32::from_rgb(240, 242, 248))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 208, 218))),
+                    );
+                    if btn.clicked() {
+                        self.request_session(true);
+                    }
+
+                    let btn = ui.add_sized(
+                        [w, 36.0],
+                        Button::new(
+                            RichText::new("Завершить")
+                                .size(15.0)
+                                .color(Color32::from_rgb(200, 60, 50)),
+                        )
+                        .fill(Color32::from_rgb(255, 240, 238))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(230, 190, 185))),
+                    );
+                    if btn.clicked() {
+                        self.close_session();
+                    }
+
+                    let btn = ui.add_sized(
+                        [w, 36.0],
+                        Button::new(
+                            RichText::new(self.tr(TextKey::Files))
+                                .size(15.0)
+                                .color(Color32::from_rgb(60, 72, 90)),
+                        )
+                        .fill(Color32::from_rgb(245, 246, 250))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(215, 222, 232))),
+                    );
+                    if btn.clicked() {
+                        self.status_line = format!(
+                            "Открыта рабочая область передачи файлов для {}.",
+                            host.name
+                        );
+                        self.add_activity(format!(
+                            "Открыт раздел передачи файлов для {}",
+                            host.name
+                        ));
+                    }
+
+                    ui.add_space(14.0);
+
+                    // Permissions
+                    ui.label(
+                        RichText::new(self.tr(TextKey::Permissions))
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(60, 72, 90)),
+                    );
+                    ui.add_space(6.0);
+                    permission_row(ui, self.tr(TextKey::Screen), host.permissions.screen_capture);
+                    permission_row(ui, self.tr(TextKey::Input), host.permissions.input_control);
+                    permission_row(ui, self.tr(TextKey::Access), host.permissions.accessibility);
+                    permission_row(ui, self.tr(TextKey::Files), host.permissions.file_transfer);
                 }
             });
     }
@@ -2147,8 +2759,8 @@ impl App for ConsoleApp {
         self.process_media_events(ctx);
         self.ensure_selection_visible();
         self.top_bar(ctx);
-        self.left_panel(ctx);
         self.center_panel(ctx);
+        self.host_details(ctx);
         self.session_window(ctx);
         self.footer(ctx);
     }
@@ -2239,35 +2851,66 @@ fn app_brand_name() -> &'static str {
 
 fn apply_console_theme(ctx: &Context) {
     let mut style = (*ctx.style()).clone();
-    style.visuals = egui::Visuals::light();
-    style.visuals.window_corner_radius = CornerRadius::same(6);
-    style.visuals.menu_corner_radius = CornerRadius::same(6);
-    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(245, 247, 249);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(242, 245, 248);
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(190, 198, 206));
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(226, 234, 243);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(86, 119, 164));
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(210, 223, 237);
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(63, 98, 145));
-    style.visuals.selection.bg_fill = Color32::from_rgb(188, 210, 233);
+    let mut visuals = egui::Visuals::light();
+
+    // Background
+    visuals.window_fill = Color32::from_rgb(248, 250, 254);
+    visuals.panel_fill = Color32::from_rgb(240, 243, 248);
+    visuals.extreme_bg_color = Color32::from_rgb(252, 253, 255);
+    visuals.faint_bg_color = Color32::from_rgb(235, 239, 245);
+
+    // Widgets
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(240, 243, 248);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(200, 208, 218));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(60, 70, 85));
+
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(242, 245, 250);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(205, 212, 222));
+
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(220, 232, 248);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(100, 130, 190));
+
+    visuals.widgets.active.bg_fill = Color32::from_rgb(200, 218, 242);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 100, 165));
+
+    visuals.widgets.open.bg_fill = Color32::from_rgb(225, 235, 250);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, Color32::from_rgb(90, 120, 180));
+
+    // Selection
+    visuals.selection.bg_fill = Color32::from_rgb(200, 218, 242);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(80, 120, 190));
+
+    // Window
+    visuals.window_corner_radius = CornerRadius::same(8);
+    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(210, 218, 228));
+    visuals.menu_corner_radius = CornerRadius::same(8);
+
+    // Popup
+    visuals.popup_shadow = egui::epaint::Shadow::NONE;
+
+    style.visuals = visuals;
     style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.window_margin = egui::Margin::same(10);
     ctx.set_style(style);
 }
 
 fn menu_button(ui: &mut Ui, label: &str) -> egui::Response {
-    ui.add(Button::new(label).fill(Color32::from_rgb(242, 245, 248)))
+    ui.add(
+        Button::new(RichText::new(label).size(14.0))
+            .fill(Color32::from_rgb(235, 240, 248))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+    )
 }
 
 fn panel_title(ui: &mut Ui, title: &str) {
     ui.label(
         RichText::new(title)
             .strong()
-            .size(14.5)
-            .color(Color32::from_rgb(48, 61, 76)),
+            .size(13.0)
+            .color(Color32::from_rgb(50, 62, 80)),
     );
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 }
 
 fn status_chip(ui: &mut Ui, text: &str, tint: Color32, fill: Color32) {
@@ -2277,20 +2920,24 @@ fn status_chip(ui: &mut Ui, text: &str, tint: Color32, fill: Color32) {
         .corner_radius(CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).strong().color(tint));
+            ui.label(RichText::new(text).strong().size(13.0).color(tint));
         });
+}
+
+fn status_chip_dark(ui: &mut Ui, text: &str, tint: Color32, fill: Color32) {
+    status_chip(ui, text, tint, fill);
 }
 
 fn permission_chip(ui: &mut Ui, text: &str, enabled: bool) {
     let tint = if enabled {
-        Color32::from_rgb(47, 120, 62)
+        Color32::from_rgb(40, 120, 65)
     } else {
-        Color32::from_rgb(135, 97, 58)
+        Color32::from_rgb(150, 110, 50)
     };
     let fill = if enabled {
-        Color32::from_rgb(224, 241, 228)
+        Color32::from_rgb(220, 240, 225)
     } else {
-        Color32::from_rgb(245, 233, 219)
+        Color32::from_rgb(248, 240, 225)
     };
     let label = if enabled {
         text.to_owned()
@@ -2300,17 +2947,26 @@ fn permission_chip(ui: &mut Ui, text: &str, enabled: bool) {
     status_chip(ui, &label, tint, fill);
 }
 
+fn permission_chip_dark(ui: &mut Ui, text: &str, enabled: bool) {
+    permission_chip(ui, text, enabled);
+}
+
 fn inspector_card(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
     Frame::new()
         .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, Color32::from_rgb(196, 202, 209)))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(210, 218, 228)))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(egui::Margin::same(10))
+        .inner_margin(egui::Margin::same(12))
         .show(ui, add_contents);
 }
 
 fn labeled_edit(ui: &mut Ui, label: &str, value: &mut String, password: bool) {
-    ui.label(RichText::new(label).strong());
+    ui.label(
+        RichText::new(label)
+            .strong()
+            .size(14.0)
+            .color(Color32::from_rgb(60, 72, 90)),
+    );
     let mut edit = TextEdit::singleline(value).desired_width(f32::INFINITY);
     if password {
         edit = edit.password(true);
@@ -2321,59 +2977,103 @@ fn labeled_edit(ui: &mut Ui, label: &str, value: &mut String, password: bool) {
 fn table_header(ui: &mut Ui, language: AppLanguage) {
     ui.horizontal(|ui| {
         ui.add_space(22.0);
-        column_text(ui, language.text(TextKey::Computer), 160.0, true);
-        column_text(ui, "ID", 92.0, true);
-        column_text(ui, language.text(TextKey::Endpoint), 180.0, true);
-        column_text(ui, language.text(TextKey::ActivityShort), 110.0, true);
+        column_text(ui, language.text(TextKey::Computer), 160.0, true, Color32::from_rgb(50, 62, 80));
+        column_text(ui, "ID", 92.0, true, Color32::from_rgb(50, 62, 80));
+        column_text(ui, language.text(TextKey::Endpoint), 180.0, true, Color32::from_rgb(50, 62, 80));
+        column_text(ui, language.text(TextKey::ActivityShort), 110.0, true, Color32::from_rgb(50, 62, 80));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(language.text(TextKey::State)).strong());
+            ui.label(
+                RichText::new(language.text(TextKey::State))
+                    .size(13.0)
+                    .strong()
+                    .color(Color32::from_rgb(50, 62, 80)),
+            );
         });
     });
 }
 
-fn column_text(ui: &mut Ui, text: &str, width: f32, strong: bool) {
+fn column_text(ui: &mut Ui, text: &str, width: f32, strong: bool, color: Color32) {
     let rich = if strong {
-        RichText::new(text).strong()
+        RichText::new(text).strong().size(14.0).color(color)
     } else {
-        RichText::new(text)
+        RichText::new(text).size(14.0).color(color)
     };
-    ui.add_sized([width, 18.0], egui::Label::new(rich));
+    ui.add_sized([width, 20.0], egui::Label::new(rich));
 }
 
 fn state_dot(ui: &mut Ui, state: HostState) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, state.tint());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+    ui.painter().circle_filled(rect.center(), 5.0, state.tint());
 }
 
 fn detail_row(ui: &mut Ui, label: &str, value: &str) {
-    ui.label(
-        RichText::new(label)
-            .strong()
-            .color(Color32::from_rgb(75, 87, 100)),
-    );
-    ui.label(value);
-    ui.end_row();
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(label)
+                .size(13.0)
+                .color(Color32::from_rgb(130, 140, 155)),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(value)
+                    .size(13.0)
+                    .color(Color32::from_rgb(50, 60, 78)),
+            );
+        });
+    });
+    ui.add_space(4.0);
+}
+
+fn detail_row_dark(ui: &mut Ui, label: &str, value: &str) {
+    detail_row(ui, label, value);
+}
+
+fn permission_row(ui: &mut Ui, label: &str, enabled: bool) {
+    ui.horizontal(|ui| {
+        let (icon, color) = if enabled {
+            ("●", Color32::from_rgb(40, 150, 70))
+        } else {
+            ("○", Color32::from_rgb(180, 130, 60))
+        };
+        ui.label(RichText::new(icon).size(14.0).color(color));
+        ui.label(
+            RichText::new(label)
+                .size(13.0)
+                .color(Color32::from_rgb(60, 70, 88)),
+        );
+    });
+    ui.add_space(3.0);
 }
 
 fn action_button(ui: &mut Ui, label: &str) -> egui::Response {
-    ui.add(action_button_widget(label))
+    ui.add(
+        Button::new(RichText::new(label).size(14.0))
+            .min_size(Vec2::new(100.0, 30.0))
+            .fill(Color32::from_rgb(235, 240, 248))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+    )
 }
 
 fn action_button_widget(label: &str) -> impl egui::Widget {
-    Button::new(label)
-        .min_size(Vec2::new(104.0, 30.0))
-        .fill(Color32::from_rgb(235, 240, 246))
+    Button::new(RichText::new(label).size(14.0))
+        .min_size(Vec2::new(104.0, 32.0))
+        .fill(Color32::from_rgb(235, 240, 248))
 }
 
 fn subpanel(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     Frame::new()
-        .fill(Color32::from_rgb(247, 249, 251))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(210, 216, 222)))
+        .fill(Color32::from_rgb(248, 250, 254))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(215, 222, 232)))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(egui::Margin::same(10))
+        .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            ui.label(RichText::new(title).strong());
-            ui.add_space(6.0);
+            ui.label(
+                RichText::new(title)
+                    .strong()
+                    .size(14.0)
+                    .color(Color32::from_rgb(60, 72, 90)),
+            );
+            ui.add_space(8.0);
             add_contents(ui);
         });
 }
@@ -2385,12 +3085,16 @@ fn empty_state(ui: &mut Ui, text: &str) {
         Layout::centered_and_justified(egui::Direction::TopDown),
         |ui| {
             Frame::new()
-                .fill(Color32::from_rgb(247, 249, 251))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(211, 217, 223)))
+                .fill(Color32::from_rgb(245, 248, 252))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(215, 222, 232)))
                 .corner_radius(CornerRadius::same(6))
                 .show(ui, |ui| {
                     ui.add_space(20.0);
-                    ui.label(RichText::new(text).color(Color32::from_rgb(90, 101, 113)));
+                    ui.label(
+                        RichText::new(text)
+                            .size(15.0)
+                            .color(Color32::from_rgb(120, 130, 148)),
+                    );
                     ui.add_space(20.0);
                 });
         },
