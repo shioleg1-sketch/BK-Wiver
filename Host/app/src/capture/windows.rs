@@ -368,9 +368,7 @@ impl WindowsCaptureEngine {
                 );
             }
 
-            if elapsed_ms > SEVERE_DXGI_FRAME_MS
-                || self.consecutive_slow_dxgi_frames >= MAX_CONSECUTIVE_SLOW_DXGI_FRAMES
-            {
+            if self.consecutive_slow_dxgi_frames >= MAX_CONSECUTIVE_SLOW_DXGI_FRAMES {
                 self.reinitialize_dxgi_backend(format!(
                     "slow frame recovery elapsed_ms={} consecutive_slow_frames={}",
                     elapsed_ms, self.consecutive_slow_dxgi_frames
@@ -387,7 +385,7 @@ impl WindowsCaptureEngine {
             "capture.dxgi",
             format!("reinitializing backend reason={}", reason),
         );
-        self.dxgi_backend = match DxgiCaptureBackend::new() {
+        let replacement = match DxgiCaptureBackend::new() {
             Ok(backend) => Some(backend),
             Err(error) => {
                 logging::append_log(
@@ -398,6 +396,15 @@ impl WindowsCaptureEngine {
                 None
             }
         };
+        if let Some(backend) = replacement {
+            self.dxgi_backend = Some(backend);
+        } else {
+            logging::append_log(
+                "WARN",
+                "capture.dxgi",
+                "keeping existing dxgi backend after failed slow-frame reinitialization",
+            );
+        }
         self.consecutive_slow_dxgi_frames = 0;
     }
 }
