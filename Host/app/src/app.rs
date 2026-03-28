@@ -1175,7 +1175,25 @@ impl HostApp {
                             )
                             .clicked()
                         {
-                            // refresh is handled in the main loop
+                            self.refresh();
+                        }
+                        if ui
+                            .add_sized(
+                                [90.0, 26.0],
+                                EguiButton::new(
+                                    RichText::new(self.tr("Запустить агент", "Run Agent"))
+                                        .size(12.0),
+                                )
+                                .fill(Color32::from_rgb(235, 240, 248))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+                            )
+                            .clicked()
+                        {
+                            self.status_line = match try_run_agent_task() {
+                                Ok(message) => message,
+                                Err(message) => message,
+                            };
+                            self.refresh();
                         }
                         if ui
                             .add_sized(
@@ -1204,7 +1222,20 @@ impl HostApp {
                             )
                             .clicked()
                         {
-                            let _ = logging::export_diagnostic_report();
+                            self.status_line = match logging::export_diagnostic_report() {
+                                Ok(path) => {
+                                    logging::append_log(
+                                        "INFO",
+                                        "host.log_export",
+                                        format!("saved_to={}", path.display()),
+                                    );
+                                    format!("Лог сохранён: {}", path.display())
+                                }
+                                Err(error) => {
+                                    logging::append_log("ERROR", "host.log_export", &error);
+                                    format!("Не удалось сохранить лог: {error}")
+                                }
+                            };
                         }
                     });
                 });
