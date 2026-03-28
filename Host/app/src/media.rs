@@ -200,6 +200,19 @@ impl StreamProfile {
         }
     }
 
+    fn capture_dimensions_for_backend(self, backend_hint: Option<&str>) -> (u32, u32) {
+        let is_remote_backend = backend_hint
+            .map(|backend| {
+                backend.starts_with("windows-rdp-") || backend.starts_with("windows-headless-")
+            })
+            .unwrap_or(false);
+
+        match self {
+            Self::Sharp if is_remote_backend => (1600, 900),
+            _ => self.max_dimensions(),
+        }
+    }
+
     fn target_frame_interval(self) -> Duration {
         Duration::from_secs_f64(1.0 / self.target_fps() as f64)
     }
@@ -628,15 +641,37 @@ pub fn spawn_stream(
             let mut frame_index = 0u32;
             let mut capture_engine = CaptureEngine::new();
             let mut dropped_stale_frames = 0u64;
+            let mut last_backend_hint: Option<&'static str> = None;
+            let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32))> = None;
 
             while !stop_capture.load(Ordering::Relaxed) {
                 let stream_profile = capture_profile
                     .lock()
                     .map(|guard| *guard)
                     .unwrap_or(StreamProfile::Balanced);
+                let capture_dimensions =
+                    stream_profile.capture_dimensions_for_backend(last_backend_hint);
+                if last_logged_dimensions != Some((stream_profile, capture_dimensions)) {
+                    if capture_dimensions != stream_profile.max_dimensions() {
+                        logging::append_log(
+                            "INFO",
+                            "media.profile",
+                            format!(
+                                "session_id={} profile={} backend_hint={} tuned_capture={}x{}",
+                                capture_session_id,
+                                stream_profile.wire_name(),
+                                last_backend_hint.unwrap_or("unknown"),
+                                capture_dimensions.0,
+                                capture_dimensions.1
+                            ),
+                        );
+                    }
+                    last_logged_dimensions = Some((stream_profile, capture_dimensions));
+                }
                 let capture_started = Instant::now();
-                let captured = capture_engine.capture(stream_profile.max_dimensions(), frame_index);
+                let captured = capture_engine.capture(capture_dimensions, frame_index);
                 let capture_ms = capture_started.elapsed().as_millis();
+                last_backend_hint = Some(captured.backend);
 
                 if captured.used_fallback && frame_index % 60 == 1 {
                     logging::append_log(
