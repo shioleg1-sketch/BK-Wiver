@@ -1,6 +1,7 @@
 use dxgi_capture_rs::{CaptureError, DXGIManager};
 use image::{ImageBuffer, RgbaImage};
 use screenshots::Screen;
+use std::time::Duration;
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
@@ -38,6 +39,7 @@ pub struct WindowsCaptureEngine {
     preferred_backend: WindowsCaptureBackendKind,
     dxgi_backend: Option<DxgiCaptureBackend>,
     gdi_backend: Option<GdiCaptureBackend>,
+    consecutive_slow_dxgi_frames: u32,
     screenshots_fallback: ScreenshotsCaptureBackend,
     last_successful_frame: Option<RgbaImage>,
     last_successful_frame_index: u32,
@@ -98,6 +100,7 @@ impl WindowsCaptureEngine {
             preferred_backend,
             dxgi_backend,
             gdi_backend,
+            consecutive_slow_dxgi_frames: 0,
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
                 screenshots_backend_name,
             ),
@@ -115,10 +118,20 @@ impl WindowsCaptureEngine {
 
         match self.preferred_backend {
             WindowsCaptureBackendKind::DxgiDuplication => {
-                if let Some(backend) = &mut self.dxgi_backend {
-                    match backend.capture(max_dimensions, frame_index) {
+                if self.dxgi_backend.is_some() {
+                    let (result, capture_elapsed) = {
+                        let backend = self.dxgi_backend.as_mut().expect("dxgi backend checked");
+                        let started = std::time::Instant::now();
+                        let result = backend.capture(max_dimensions, frame_index);
+                        (result, started.elapsed())
+                    };
+
+                    match result {
                         Ok(image) => self.capture_frame(
-                            image,
+                            {
+                                self.handle_dxgi_capture_timing(capture_elapsed);
+                                image
+                            },
                             backend_name_for(
                                 self.strategy,
                                 WindowsCaptureBackendKind::DxgiDuplication,
@@ -127,6 +140,7 @@ impl WindowsCaptureEngine {
                             frame_index,
                         ),
                         Err(error) => {
+                            self.consecutive_slow_dxgi_frames = 0;
                             logging::append_log(
                                 "WARN",
                                 "capture.dxgi",
@@ -329,6 +343,62 @@ impl WindowsCaptureEngine {
             );
             self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
         }
+    }
+
+    fn handle_dxgi_capture_timing(&mut self, elapsed: Duration) {
+        const SLOW_DXGI_FRAME_MS: u128 = 75;
+        const SEVERE_DXGI_FRAME_MS: u128 = 120;
+        const MAX_CONSECUTIVE_SLOW_DXGI_FRAMES: u32 = 3;
+
+        let elapsed_ms = elapsed.as_millis();
+        if elapsed_ms > SLOW_DXGI_FRAME_MS {
+            self.consecutive_slow_dxgi_frames =
+                self.consecutive_slow_dxgi_frames.saturating_add(1);
+            if self.consecutive_slow_dxgi_frames == 1
+                || elapsed_ms > SEVERE_DXGI_FRAME_MS
+                || self.consecutive_slow_dxgi_frames >= MAX_CONSECUTIVE_SLOW_DXGI_FRAMES
+            {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi",
+                    format!(
+                        "slow frame detected elapsed_ms={} consecutive_slow_frames={}",
+                        elapsed_ms, self.consecutive_slow_dxgi_frames
+                    ),
+                );
+            }
+
+            if elapsed_ms > SEVERE_DXGI_FRAME_MS
+                || self.consecutive_slow_dxgi_frames >= MAX_CONSECUTIVE_SLOW_DXGI_FRAMES
+            {
+                self.reinitialize_dxgi_backend(format!(
+                    "slow frame recovery elapsed_ms={} consecutive_slow_frames={}",
+                    elapsed_ms, self.consecutive_slow_dxgi_frames
+                ));
+            }
+        } else {
+            self.consecutive_slow_dxgi_frames = 0;
+        }
+    }
+
+    fn reinitialize_dxgi_backend(&mut self, reason: String) {
+        logging::append_log(
+            "WARN",
+            "capture.dxgi",
+            format!("reinitializing backend reason={}", reason),
+        );
+        self.dxgi_backend = match DxgiCaptureBackend::new() {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi",
+                    format!("reinitialization failed after slow frame: {}", error),
+                );
+                None
+            }
+        };
+        self.consecutive_slow_dxgi_frames = 0;
     }
 }
 
