@@ -115,6 +115,14 @@ impl WindowsCaptureEngine {
         {
             self.try_restore_primary_backends();
         }
+        if self.preferred_backend == WindowsCaptureBackendKind::Win32Gdi
+            && frame_index % 120 == 0
+        {
+            self.try_restore_primary_backends();
+            if self.preferred_backend != WindowsCaptureBackendKind::Win32Gdi {
+                return self.capture(max_dimensions, frame_index);
+            }
+        }
 
         match self.preferred_backend {
             WindowsCaptureBackendKind::DxgiDuplication => {
