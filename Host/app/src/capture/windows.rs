@@ -127,18 +127,18 @@ impl WindowsCaptureEngine {
                     };
 
                     match result {
-                        Ok(image) => self.capture_frame(
-                            {
-                                self.handle_dxgi_capture_timing(capture_elapsed);
-                                image
-                            },
-                            backend_name_for(
-                                self.strategy,
-                                WindowsCaptureBackendKind::DxgiDuplication,
-                            ),
-                            false,
-                            frame_index,
-                        ),
+                        Ok(image) => {
+                            self.handle_dxgi_capture_timing(capture_elapsed);
+                            self.capture_frame(
+                                image,
+                                backend_name_for(
+                                    self.strategy,
+                                    WindowsCaptureBackendKind::DxgiDuplication,
+                                ),
+                                false,
+                                frame_index,
+                            )
+                        }
                         Err(error) => {
                             self.consecutive_slow_dxgi_frames = 0;
                             logging::append_log(
