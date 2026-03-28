@@ -1,8 +1,12 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use eframe::{
-    App, NativeOptions,
-    egui::{self, Align, Color32, Layout, RichText, Stroke, ViewportCommand},
+    App, CreationContext, NativeOptions,
+    egui::{
+        self, Align, Button as EguiButton, CentralPanel, Color32, CornerRadius, Frame, Layout,
+        RichText, ScrollArea, Sense, Stroke, TextEdit, TopBottomPanel, Ui, Vec2,
+        ViewportCommand,
+    },
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -173,7 +177,7 @@ fn run_tray_app() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "BK-Host",
         options,
-        Box::new(|_cc| Ok(Box::new(HostApp::new(command_rx)))),
+        Box::new(|cc| Ok(Box::new(HostApp::new(cc, command_rx)))),
     )?;
 
     Ok(())
@@ -291,7 +295,8 @@ struct HostApp {
 }
 
 impl HostApp {
-    fn new(command_rx: Receiver<HostUiCommand>) -> Self {
+    fn new(cc: &CreationContext<'_>, command_rx: Receiver<HostUiCommand>) -> Self {
+        apply_host_theme(&cc.egui_ctx);
         let settings = load_json::<HostUiSettings>("ui-settings.json").unwrap_or_default();
         let (signal_tx, signal_rx) = unbounded::<SignalEvent>();
         let mut app = Self {
@@ -325,6 +330,10 @@ impl HostApp {
         app.refresh();
         app.maybe_auto_connect();
         app
+    }
+
+    fn apply_theme(&self, ctx: &egui::Context) {
+        apply_host_theme(ctx);
     }
 
     fn tr(&self, ru: &'static str, en: &'static str) -> &'static str {
@@ -1026,27 +1035,6 @@ impl HostApp {
         self.agent_status = Some(updated);
     }
 
-    fn status_badge(ui: &mut egui::Ui, label: &str, ok: bool) {
-        let fill = if ok {
-            Color32::from_rgb(215, 238, 219)
-        } else {
-            Color32::from_rgb(246, 226, 226)
-        };
-        let text = if ok {
-            Color32::from_rgb(39, 105, 54)
-        } else {
-            Color32::from_rgb(145, 47, 47)
-        };
-        egui::Frame::new()
-            .fill(fill)
-            .stroke(Stroke::new(1.0, text))
-            .corner_radius(4)
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| {
-                ui.label(RichText::new(label).color(text).strong());
-            });
-    }
-
     fn handle_commands(&mut self, ctx: &egui::Context) {
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
@@ -1067,6 +1055,161 @@ impl HostApp {
             }
         }
     }
+
+    fn top_bar(&mut self, ctx: &egui::Context) {
+        TopBottomPanel::top("host_top_bar")
+            .frame(
+                Frame::new()
+                    .fill(Color32::from_rgb(0, 120, 212))
+                    .inner_margin(egui::Margin::symmetric(16, 10)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("BK-Host")
+                            .size(20.0)
+                            .strong()
+                            .color(Color32::WHITE),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(app_build_label())
+                            .size(12.0)
+                            .monospace()
+                            .color(Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // Language
+                        if ui
+                            .add(
+                                EguiButton::new(
+                                    RichText::new("EN")
+                                        .size(13.0)
+                                        .color(if self.language == AppLanguage::En {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+                                        }),
+                                )
+                                .fill(if self.language == AppLanguage::En {
+                                    Color32::from_rgb(0, 90, 170)
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            self.set_language(AppLanguage::En);
+                        }
+                        if ui
+                            .add(
+                                EguiButton::new(
+                                    RichText::new("RU")
+                                        .size(13.0)
+                                        .color(if self.language == AppLanguage::Ru {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+                                        }),
+                                )
+                                .fill(if self.language == AppLanguage::Ru {
+                                    Color32::from_rgb(0, 90, 170)
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .stroke(Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            self.set_language(AppLanguage::Ru);
+                        }
+
+                        ui.add_space(16.0);
+
+                        // Status indicator
+                        let is_registered = !self.registration.device_id.is_empty();
+                        let (status_text, status_color) = if is_registered {
+                            ("Online", Color32::from_rgb(100, 255, 100))
+                        } else {
+                            ("Offline", Color32::from_rgb(255, 100, 100))
+                        };
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, status_color);
+                        ui.label(
+                            RichText::new(status_text)
+                                .size(13.0)
+                                .color(Color32::from_rgba_unmultiplied(255, 255, 255, 200)),
+                        );
+                    });
+                });
+            });
+    }
+
+    fn footer(&mut self, ctx: &egui::Context) {
+        TopBottomPanel::bottom("host_status_bar")
+            .frame(
+                Frame::new()
+                    .fill(Color32::from_rgb(240, 242, 248))
+                    .inner_margin(egui::Margin::symmetric(16, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(&self.status_line)
+                            .size(12.0)
+                            .color(Color32::from_rgb(100, 110, 128)),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // Action buttons in footer
+                        if ui
+                            .add_sized(
+                                [70.0, 26.0],
+                                EguiButton::new(
+                                    RichText::new(self.tr("Обновить", "Refresh"))
+                                        .size(12.0),
+                                )
+                                .fill(Color32::from_rgb(235, 240, 248))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+                            )
+                            .clicked()
+                        {
+                            // refresh is handled in the main loop
+                        }
+                        if ui
+                            .add_sized(
+                                [80.0, 26.0],
+                                EguiButton::new(
+                                    RichText::new(self.tr("Показать ID", "Show ID"))
+                                        .size(12.0),
+                                )
+                                .fill(Color32::from_rgb(235, 240, 248))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+                            )
+                            .clicked()
+                        {
+                            self.show_id_window = true;
+                            self.main_window_visible = true;
+                        }
+                        if ui
+                            .add_sized(
+                                [80.0, 26.0],
+                                EguiButton::new(
+                                    RichText::new(self.tr("Сохранить лог", "Save log"))
+                                        .size(12.0),
+                                )
+                                .fill(Color32::from_rgb(235, 240, 248))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(205, 212, 222))),
+                            )
+                            .clicked()
+                        {
+                            let _ = logging::export_diagnostic_report();
+                        }
+                    });
+                });
+            });
+    }
 }
 
 fn normalize_server_url(value: &str) -> String {
@@ -1084,6 +1227,103 @@ fn normalize_server_url(value: &str) -> String {
     } else {
         format!("http://{trimmed}")
     }
+}
+
+fn apply_host_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    let mut visuals = egui::Visuals::light();
+
+    visuals.window_fill = Color32::from_rgb(248, 250, 254);
+    visuals.panel_fill = Color32::from_rgb(240, 243, 248);
+    visuals.extreme_bg_color = Color32::from_rgb(252, 253, 255);
+    visuals.faint_bg_color = Color32::from_rgb(235, 239, 245);
+
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(240, 243, 248);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(200, 208, 218));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(60, 70, 85));
+
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(242, 245, 250);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(205, 212, 222));
+
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(220, 232, 248);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(100, 130, 190));
+
+    visuals.widgets.active.bg_fill = Color32::from_rgb(200, 218, 242);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 100, 165));
+
+    visuals.widgets.open.bg_fill = Color32::from_rgb(225, 235, 250);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, Color32::from_rgb(90, 120, 180));
+
+    visuals.selection.bg_fill = Color32::from_rgb(200, 218, 242);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(80, 120, 190));
+
+    visuals.window_corner_radius = CornerRadius::same(8);
+    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(210, 218, 228));
+    visuals.menu_corner_radius = CornerRadius::same(8);
+
+    visuals.popup_shadow = egui::epaint::Shadow::NONE;
+
+    style.visuals = visuals;
+    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+    style.spacing.button_padding = Vec2::new(12.0, 6.0);
+    style.spacing.window_margin = egui::Margin::same(10);
+    ctx.set_style(style);
+}
+
+fn host_labeled_edit(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) {
+    ui.label(
+        RichText::new(label)
+            .size(13.0)
+            .strong()
+            .color(Color32::from_rgb(60, 72, 90)),
+    );
+    ui.add_space(4.0);
+    let mut edit = TextEdit::singleline(value)
+        .desired_width(f32::INFINITY)
+        .font(egui::TextStyle::Monospace.resolve(ui.style()));
+    if password {
+        edit = edit.password(true);
+    }
+    ui.add(edit);
+}
+
+fn host_detail_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(label)
+                .size(13.0)
+                .color(Color32::from_rgb(130, 140, 155)),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(value)
+                    .size(13.0)
+                    .color(Color32::from_rgb(50, 60, 78)),
+            );
+        });
+    });
+    ui.add_space(4.0);
+}
+
+fn host_status_chip(ui: &mut Ui, text: &str, ok: bool) {
+    let tint = if ok {
+        Color32::from_rgb(40, 120, 65)
+    } else {
+        Color32::from_rgb(150, 80, 55)
+    };
+    let fill = if ok {
+        Color32::from_rgb(220, 240, 225)
+    } else {
+        Color32::from_rgb(246, 226, 226)
+    };
+    Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, tint))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).strong().size(13.0).color(tint));
+        });
 }
 
 fn is_loopback_server_url(value: &str) -> bool {
@@ -1134,204 +1374,194 @@ impl App for HostApp {
             self.refresh();
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("BK-Host");
-            ui.label(
-                RichText::new(app_build_label())
-                    .monospace()
-                    .color(Color32::from_rgb(108, 118, 128)),
-            );
-            ui.label(self.tr(
-                "BK-Host устанавливается на ПК пользователя, работает в трее и показывает ID хоста для подключений оператора.",
-                "BK-Host is installed on the user PC, runs in the tray, and exposes the host ID for operator connections.",
-            ));
-            ui.add_space(10.0);
+        self.top_bar(ctx);
+        self.footer(ctx);
 
-            ui.horizontal(|ui| {
-                if ui.button(self.tr("Обновить", "Refresh")).clicked() {
-                    self.refresh();
-                }
-                if ui.button(self.tr("Показать ID", "Show ID")).clicked() {
-                    self.show_id_window = true;
-                    self.main_window_visible = true;
-                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(ViewportCommand::Focus);
-                }
-                if ui.button(self.tr("Сохранить лог", "Save log")).clicked() {
-                    self.status_line = match logging::export_diagnostic_report() {
-                        Ok(path) => {
-                            logging::append_log(
-                                "INFO",
-                                "host.log_export",
-                                format!("saved_to={}", path.display()),
-                            );
-                            format!("Лог сохранён: {}", path.display())
-                        }
-                        Err(error) => {
-                            logging::append_log("ERROR", "host.log_export", &error);
-                            format!("Не удалось сохранить лог: {error}")
-                        }
-                    };
-                }
-                if ui.button(self.tr("Скрыть", "Hide")).clicked() {
-                    self.show_id_window = false;
-                    self.main_window_visible = false;
-                    ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                }
-                if ui.button(self.tr("Запустить агент", "Run Agent")).clicked() {
-                    self.status_line = match try_run_agent_task() {
-                        Ok(message) => message,
-                        Err(message) => message,
-                    };
-                    self.refresh();
-                }
-                if ui.button(self.tr("Копировать ID", "Copy ID")).clicked()
-                    && !self.registration.device_id.is_empty()
-                {
-                    ui.ctx().copy_text(self.registration.device_id.clone());
-                    self.status_line = self
-                        .tr("ID устройства скопирован в буфер обмена.", "Device ID copied to clipboard.")
-                        .to_owned();
-                }
-                if ui.button(self.tr("Копировать код", "Copy Code")).clicked()
-                    && !self.registration.connect_code.is_empty()
-                {
-                    ui.ctx().copy_text(self.registration.connect_code.clone());
-                    self.status_line = self
-                        .tr("Код подключения скопирован в буфер обмена.", "Connect code copied to clipboard.")
-                        .to_owned();
-                }
-                ui.separator();
-                if ui
-                    .selectable_label(self.language == AppLanguage::Ru, AppLanguage::Ru.code())
-                    .clicked()
-                {
-                    self.set_language(AppLanguage::Ru);
-                }
-                if ui
-                    .selectable_label(self.language == AppLanguage::En, AppLanguage::En.code())
-                    .clicked()
-                {
-                    self.set_language(AppLanguage::En);
-                }
-            });
+        CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(Color32::from_rgb(240, 243, 248))
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show(ctx, |ui| {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(12.0);
 
-            ui.add_space(12.0);
-            ui.label(&self.status_line);
-            ui.add_space(12.0);
+                        // Quick connect bar
+                        Frame::new()
+                            .fill(Color32::WHITE)
+                            .inner_margin(egui::Margin::symmetric(20, 14))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Подключение к серверу")
+                                            .size(16.0)
+                                            .strong()
+                                            .color(Color32::from_rgb(40, 50, 65)),
+                                    );
+                                });
+                            });
 
-            ui.group(|ui| {
-                ui.label(RichText::new(self.tr("Подключение к серверу", "Server connection")).strong());
-                ui.separator();
-                labeled_edit(ui, self.tr("Сервер", "Server"), &mut self.server_url_input, false);
-                labeled_edit(
-                    ui,
-                    self.tr("Токен подключения", "Enrollment token"),
-                    &mut self.enrollment_token_input,
-                    false,
-                );
-                ui.horizontal(|ui| {
-                    if ui.button(self.tr("Подключить Host", "Connect Host")).clicked() {
-                        let result = self.connect_host();
-                        if let Err(error) = result {
-                            logging::append_log("ERROR", "host.connect", &error);
-                            self.status_line = error;
-                        }
-                        self.refresh();
-                    }
-                    if ui.button(self.tr("Отправить heartbeat", "Send heartbeat")).clicked() {
-                        self.status_line = match self.send_heartbeat() {
-                            Ok(()) => self
-                                .tr("Heartbeat отправлен на сервер.", "Heartbeat sent to the server.")
-                                .to_owned(),
-                            Err(error) => {
-                                logging::append_log("ERROR", "host.heartbeat", &error);
-                                error
-                            }
-                        };
-                        self.refresh();
-                    }
-                });
-            });
+                        // Server connection card
+                        Frame::new()
+                            .fill(Color32::WHITE)
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(210, 218, 228)))
+                            .corner_radius(CornerRadius::same(6))
+                            .inner_margin(egui::Margin::symmetric(20, 14))
+                            .show(ui, |ui| {
+                                ui.add_space(4.0);
+                                host_labeled_edit(ui, self.tr("Сервер", "Server"), &mut self.server_url_input, false);
+                                ui.add_space(4.0);
+                                host_labeled_edit(ui, self.tr("Токен подключения", "Enrollment token"), &mut self.enrollment_token_input, false);
+                                ui.add_space(10.0);
+                                ui.horizontal(|ui| {
+                                    let btn = ui.add_sized(
+                                        [150.0, 34.0],
+                                        EguiButton::new(
+                                            RichText::new(self.tr("Подключить Host", "Connect Host"))
+                                                .size(14.0)
+                                                .color(Color32::WHITE),
+                                        )
+                                        .fill(Color32::from_rgb(0, 120, 212)),
+                                    );
+                                    if btn.clicked() {
+                                        let result = self.connect_host();
+                                        if let Err(error) = result {
+                                            logging::append_log("ERROR", "host.connect", &error);
+                                            self.status_line = error;
+                                        }
+                                        self.refresh();
+                                    }
 
-            ui.add_space(12.0);
+                                    let btn = ui.add_sized(
+                                        [150.0, 34.0],
+                                        EguiButton::new(
+                                            RichText::new(self.tr("Отправить heartbeat", "Send heartbeat"))
+                                                .size(14.0),
+                                        )
+                                        .fill(Color32::from_rgb(240, 242, 248))
+                                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 208, 218))),
+                                    );
+                                    if btn.clicked() {
+                                        self.status_line = match self.send_heartbeat() {
+                                            Ok(()) => self
+                                                .tr("Heartbeat отправлен на сервер.", "Heartbeat sent to the server.")
+                                                .to_owned(),
+                                            Err(error) => {
+                                                logging::append_log("ERROR", "host.heartbeat", &error);
+                                                error
+                                            }
+                                        };
+                                        self.refresh();
+                                    }
+                                });
+                            });
 
-            ui.columns(2, |columns| {
-                columns[0].group(|ui| {
-                    ui.label(RichText::new(self.tr("Устройство", "Device")).strong());
-                    ui.separator();
-                    field_row(ui, self.tr("ID устройства", "Device ID"), value_or_placeholder(&self.registration.device_id, self.tr("ещё не зарегистрирован", "not registered")));
-                    field_row(ui, self.tr("Код подключения", "Connect Code"), value_or_placeholder(&self.registration.connect_code, self.tr("недоступен", "not available")));
-                    field_row(ui, self.tr("Имя устройства", "Device Name"), value_or_placeholder(&self.registration.device_name, self.tr("неизвестно", "unknown")));
-                    field_row(ui, self.tr("Сервер", "Server"), value_or_placeholder(&self.registration.server_url, self.tr("неизвестен", "unknown")));
-                    let heartbeat_interval = if self.registration.heartbeat_interval_sec == 0 {
-                        self.tr("не задан", "not set").to_owned()
-                    } else {
-                        format!("{} {}", self.registration.heartbeat_interval_sec, self.tr("сек", "sec"))
-                    };
-                    field_row(ui, self.tr("Интервал heartbeat", "Heartbeat interval"), &heartbeat_interval);
-                });
+                        ui.add_space(12.0);
 
-                columns[1].group(|ui| {
-                    ui.label(RichText::new(self.tr("Состояние", "Runtime")).strong());
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        Self::status_badge(
-                            ui,
-                            if self.service_status.is_some() {
-                                self.tr("Сервис в сети", "Service online")
-                            } else {
-                                self.tr("Сервис не в сети", "Service offline")
-                            },
-                            self.service_status.is_some(),
+                        // Device info and Runtime status
+                        ui.columns(2, |columns| {
+                            // Device info
+                            columns[0].group(|ui| {
+                                ui.label(
+                                    RichText::new(self.tr("Устройство", "Device"))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(60, 72, 90)),
+                                );
+                                ui.separator();
+                                host_detail_row(ui, self.tr("ID устройства", "Device ID"), value_or_placeholder(&self.registration.device_id, self.tr("ещё не зарегистрирован", "not registered")));
+                                host_detail_row(ui, self.tr("Код подключения", "Connect Code"), value_or_placeholder(&self.registration.connect_code, self.tr("недоступен", "not available")));
+                                host_detail_row(ui, self.tr("Имя устройства", "Device Name"), value_or_placeholder(&self.registration.device_name, self.tr("неизвестно", "unknown")));
+                                host_detail_row(ui, self.tr("Сервер", "Server"), value_or_placeholder(&self.registration.server_url, self.tr("неизвестен", "unknown")));
+                                let heartbeat_interval = if self.registration.heartbeat_interval_sec == 0 {
+                                    self.tr("не задан", "not set").to_owned()
+                                } else {
+                                    format!("{} {}", self.registration.heartbeat_interval_sec, self.tr("сек", "sec"))
+                                };
+                                host_detail_row(ui, self.tr("Интервал heartbeat", "Heartbeat interval"), &heartbeat_interval);
+                            });
+
+                            // Runtime status
+                            columns[1].group(|ui| {
+                                ui.label(
+                                    RichText::new(self.tr("Состояние", "Runtime"))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(60, 72, 90)),
+                                );
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    host_status_chip(
+                                        ui,
+                                        if self.service_status.is_some() {
+                                            self.tr("Сервис в сети", "Service online")
+                                        } else {
+                                            self.tr("Сервис не в сети", "Service offline")
+                                        },
+                                        self.service_status.is_some(),
+                                    );
+                                    host_status_chip(
+                                        ui,
+                                        if self.agent_status.is_some() {
+                                            self.tr("Агент в сети", "Agent online")
+                                        } else {
+                                            self.tr("Агент не в сети", "Agent offline")
+                                        },
+                                        self.agent_status.is_some(),
+                                    );
+                                });
+                                ui.add_space(10.0);
+                                if let Some(service) = &self.service_status {
+                                    host_detail_row(ui, self.tr("Режим сервиса", "Service mode"), &service.mode);
+                                    host_detail_row(ui, self.tr("Состояние сервиса", "Service state"), &service.state);
+                                    host_detail_row(ui, self.tr("Обновление сервиса", "Service updated"), &format_ms(service.updated_at_ms, self.tr("никогда", "never")));
+                                    host_detail_row(ui, self.tr("Heartbeat", "Heartbeat"), &format_ms(service.last_heartbeat_at_ms, self.tr("никогда", "never")));
+                                    host_detail_row(ui, self.tr("Сообщение сервиса", "Service msg"), &service.message);
+                                } else {
+                                    ui.label(
+                                        RichText::new(self.tr("Статус сервиса ещё не опубликован.", "Service status is not published yet."))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(120, 130, 148)),
+                                    );
+                                }
+                                ui.add_space(8.0);
+                                if let Some(agent) = &self.agent_status {
+                                    host_detail_row(ui, self.tr("Режим агента", "Agent mode"), &agent.mode);
+                                    host_detail_row(ui, self.tr("Состояние агента", "Agent state"), &agent.state);
+                                    host_detail_row(ui, self.tr("Обновление агента", "Agent updated"), &format_ms(agent.updated_at_ms, self.tr("никогда", "never")));
+                                    host_detail_row(ui, self.tr("Сеанс", "Session"), value_or_placeholder(&agent.session_id, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Роль", "Role"), value_or_placeholder(&agent.session_role, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Пир", "Peer"), value_or_placeholder(&agent.session_peer, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Сигнал", "Signal"), value_or_placeholder(&agent.signal_status, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Сообщение агента", "Agent msg"), value_or_placeholder(&agent.message, self.tr("нет", "none")));
+                                } else {
+                                    ui.label(
+                                        RichText::new(self.tr("Статус агента ещё не опубликован.", "Agent status is not published yet."))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(120, 130, 148)),
+                                    );
+                                }
+                            });
+                        });
+
+                        ui.add_space(12.0);
+
+                        // Note
+                        ui.label(
+                            RichText::new(self.tr(
+                                "Host теперь держит постоянный signaling-канал и автоматически подтверждает входящий handshake request/accepted/closed.",
+                                "Host now keeps a persistent signaling channel and automatically acknowledges the request/accepted/closed handshake.",
+                            ))
+                            .size(12.0)
+                            .color(Color32::from_rgb(53, 90, 156)),
                         );
-                        Self::status_badge(
-                            ui,
-                            if self.agent_status.is_some() {
-                                self.tr("Агент в сети", "Agent online")
-                            } else {
-                                self.tr("Агент не в сети", "Agent offline")
-                            },
-                            self.agent_status.is_some(),
-                        );
+
+                        ui.add_space(8.0);
                     });
-                    ui.add_space(10.0);
-                    if let Some(service) = &self.service_status {
-                        field_row(ui, self.tr("Режим сервиса", "Service mode"), &service.mode);
-                        field_row(ui, self.tr("Состояние сервиса", "Service state"), &service.state);
-                        field_row(ui, self.tr("Обновление сервиса", "Service updated"), &format_ms(service.updated_at_ms, self.tr("никогда", "never")));
-                        field_row(ui, self.tr("Heartbeat", "Heartbeat"), &format_ms(service.last_heartbeat_at_ms, self.tr("никогда", "never")));
-                        field_row(ui, self.tr("Сообщение сервиса", "Service msg"), &service.message);
-                    } else {
-                        ui.label(self.tr("Статус сервиса ещё не опубликован.", "Service status is not published yet."));
-                    }
-                    ui.add_space(8.0);
-                    if let Some(agent) = &self.agent_status {
-                        field_row(ui, self.tr("Режим агента", "Agent mode"), &agent.mode);
-                        field_row(ui, self.tr("Состояние агента", "Agent state"), &agent.state);
-                        field_row(ui, self.tr("Обновление агента", "Agent updated"), &format_ms(agent.updated_at_ms, self.tr("никогда", "never")));
-                        field_row(ui, self.tr("Сеанс", "Session"), value_or_placeholder(&agent.session_id, self.tr("нет", "none")));
-                        field_row(ui, self.tr("Роль", "Role"), value_or_placeholder(&agent.session_role, self.tr("нет", "none")));
-                        field_row(ui, self.tr("Пир", "Peer"), value_or_placeholder(&agent.session_peer, self.tr("нет", "none")));
-                        field_row(ui, self.tr("Сигнал", "Signal"), value_or_placeholder(&agent.signal_status, self.tr("нет", "none")));
-                        field_row(ui, self.tr("Сообщение агента", "Agent msg"), value_or_placeholder(&agent.message, self.tr("нет", "none")));
-                    } else {
-                        ui.label(self.tr("Статус агента ещё не опубликован.", "Agent status is not published yet."));
-                    }
-                });
             });
-
-            ui.add_space(12.0);
-            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                ui.colored_label(
-                    Color32::from_rgb(53, 90, 156),
-                    self.tr(
-                        "Host теперь держит постоянный signaling-канал и автоматически подтверждает входящий handshake request/accepted/closed.",
-                        "Host now keeps a persistent signaling channel and automatically acknowledges the request/accepted/closed handshake.",
-                    ),
-                );
-            });
-        });
 
         if self.show_id_window {
             let not_registered = self.tr("не зарегистрирован", "not registered");
@@ -1356,38 +1586,34 @@ impl App for HostApp {
                         not_available,
                     ));
                     ui.add_space(12.0);
-                    if ui.button(copy_id_label).clicked() && !self.registration.device_id.is_empty()
-                    {
+                    let w = ui.available_width();
+                    let btn = ui.add_sized(
+                        [w, 34.0],
+                        EguiButton::new(
+                            RichText::new(copy_id_label)
+                                .size(14.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(0, 120, 212)),
+                    );
+                    if btn.clicked() && !self.registration.device_id.is_empty() {
                         ui.ctx().copy_text(self.registration.device_id.clone());
                     }
-                    if ui.button(copy_code_label).clicked()
-                        && !self.registration.connect_code.is_empty()
-                    {
+                    let btn = ui.add_sized(
+                        [w, 34.0],
+                        EguiButton::new(
+                            RichText::new(copy_code_label)
+                                .size(14.0),
+                        )
+                        .fill(Color32::from_rgb(240, 242, 248))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 208, 218))),
+                    );
+                    if btn.clicked() && !self.registration.connect_code.is_empty() {
                         ui.ctx().copy_text(self.registration.connect_code.clone());
                     }
                 });
         }
     }
-}
-
-fn labeled_edit(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) {
-    ui.horizontal(|ui| {
-        ui.set_min_width(120.0);
-        ui.label(RichText::new(label).strong());
-        let mut edit = egui::TextEdit::singleline(value).desired_width(f32::INFINITY);
-        if password {
-            edit = edit.password(true);
-        }
-        ui.add(edit);
-    });
-}
-
-fn field_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.set_min_width(120.0);
-        ui.label(RichText::new(label).strong());
-        ui.label(value);
-    });
 }
 
 fn value_or_placeholder<'a>(value: &'a str, placeholder: &'a str) -> &'a str {
