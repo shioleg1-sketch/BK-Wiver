@@ -1,5 +1,6 @@
 use dxgi_capture_rs::{CaptureError, DXGIManager};
 use image::{ImageBuffer, RgbaImage};
+use screenshots::Screen;
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
@@ -28,7 +29,8 @@ enum WindowsCaptureBackendKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowsCaptureStrategy {
     LocalDisplay,
-    RemoteDesktop,
+    RemoteDesktopWithDisplay,
+    HeadlessNoDisplay,
 }
 
 pub struct WindowsCaptureEngine {
@@ -44,25 +46,16 @@ pub struct WindowsCaptureEngine {
 impl WindowsCaptureEngine {
     pub fn new() -> Self {
         let strategy = detect_capture_strategy();
-        let dxgi_backend = if strategy == WindowsCaptureStrategy::LocalDisplay {
-            match DxgiCaptureBackend::new() {
-                Ok(backend) => Some(backend),
-                Err(error) => {
-                    logging::append_log(
-                        "WARN",
-                        "capture.dxgi",
-                        format!("initialization failed: {}", error),
-                    );
-                    None
-                }
+        let dxgi_backend = match DxgiCaptureBackend::new() {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi",
+                    format!("initialization failed: {}", error),
+                );
+                None
             }
-        } else {
-            logging::append_log(
-                "INFO",
-                "capture",
-                "remote desktop session detected, preferring scaled GDI capture",
-            );
-            None
         };
 
         let gdi_backend = match GdiCaptureBackend::new() {
@@ -77,17 +70,36 @@ impl WindowsCaptureEngine {
             }
         };
 
+        let preferred_backend =
+            preferred_backend_for_strategy(strategy, dxgi_backend.is_some());
+        let screenshots_backend_name = screenshots_backend_name_for(strategy);
+        logging::append_log(
+            "INFO",
+            "capture.strategy",
+            format!(
+                "strategy={} preferred_backend={} dxgi_available={} gdi_available={} screenshots_backend={}",
+                strategy_name(strategy),
+                backend_name_for(strategy, preferred_backend),
+                dxgi_backend.is_some(),
+                gdi_backend.is_some(),
+                screenshots_backend_name,
+            ),
+        );
+        if strategy == WindowsCaptureStrategy::HeadlessNoDisplay {
+            logging::append_log(
+                "WARN",
+                "capture.strategy",
+                "headless session detected without an active display output; fast capture typically requires a virtual display or physical monitor",
+            );
+        }
+
         Self {
             strategy,
-            preferred_backend: if strategy == WindowsCaptureStrategy::RemoteDesktop {
-                WindowsCaptureBackendKind::Win32Gdi
-            } else {
-                WindowsCaptureBackendKind::DxgiDuplication
-            },
+            preferred_backend,
             dxgi_backend,
             gdi_backend,
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
-                "windows-screenshots-fallback",
+                screenshots_backend_name,
             ),
             last_successful_frame: None,
             last_successful_frame_index: 0,
@@ -105,7 +117,15 @@ impl WindowsCaptureEngine {
             WindowsCaptureBackendKind::DxgiDuplication => {
                 if let Some(backend) = &mut self.dxgi_backend {
                     match backend.capture(max_dimensions, frame_index) {
-                        Ok(image) => self.capture_frame(image, "windows-dxgi", false, frame_index),
+                        Ok(image) => self.capture_frame(
+                            image,
+                            backend_name_for(
+                                self.strategy,
+                                WindowsCaptureBackendKind::DxgiDuplication,
+                            ),
+                            false,
+                            frame_index,
+                        ),
                         Err(error) => {
                             logging::append_log(
                                 "WARN",
@@ -117,7 +137,10 @@ impl WindowsCaptureEngine {
                                 match self.capture_with_gdi(max_dimensions) {
                                     Ok(image) => self.capture_frame(
                                         image,
-                                        "windows-gdi-temporary",
+                                        backend_name_for(
+                                            self.strategy,
+                                            WindowsCaptureBackendKind::Win32Gdi,
+                                        ),
                                         false,
                                         frame_index,
                                     ),
@@ -139,7 +162,13 @@ impl WindowsCaptureEngine {
                                 logging::append_log(
                                     "WARN",
                                     "capture.dxgi",
-                                    "switching preferred backend to windows-gdi",
+                                    format!(
+                                        "switching preferred backend to {}",
+                                        backend_name_for(
+                                            self.strategy,
+                                            WindowsCaptureBackendKind::Win32Gdi
+                                        )
+                                    ),
                                 );
                                 self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
                                 self.capture(max_dimensions, frame_index)
@@ -150,30 +179,31 @@ impl WindowsCaptureEngine {
                     logging::append_log(
                         "WARN",
                         "capture.dxgi",
-                        "backend unavailable, switching preferred backend to windows-gdi",
+                        format!(
+                            "backend unavailable, switching preferred backend to {}",
+                            backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi)
+                        ),
                     );
                     self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
                     self.capture(max_dimensions, frame_index)
                 }
             }
             WindowsCaptureBackendKind::Win32Gdi => match self.capture_with_gdi(max_dimensions) {
-                Ok(image) => {
-                    let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop {
-                        "windows-rdp-gdi"
-                    } else {
-                        "windows-gdi"
-                    };
-                    self.capture_frame(image, backend_name, false, frame_index)
-                }
+                Ok(image) => self.capture_frame(
+                    image,
+                    backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi),
+                    false,
+                    frame_index,
+                ),
                 Err(error) => {
                     logging::append_log(
-                            "WARN",
-                            "capture.gdi",
-                            format!(
-                                "frame capture failed, switching preferred backend to screenshots fallback: {}",
-                                error
-                            ),
-                        );
+                        "WARN",
+                        "capture.gdi",
+                        format!(
+                            "frame capture failed, switching preferred backend to screenshots fallback: {}",
+                            error
+                        ),
+                    );
                     self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
                     self.capture_with_screenshots(max_dimensions, frame_index)
                 }
@@ -250,7 +280,7 @@ impl WindowsCaptureEngine {
     }
 
     fn try_restore_primary_backends(&mut self) {
-        if self.strategy == WindowsCaptureStrategy::LocalDisplay && self.dxgi_backend.is_none() {
+        if self.dxgi_backend.is_none() {
             self.dxgi_backend = match DxgiCaptureBackend::new() {
                 Ok(backend) => Some(backend),
                 Err(error) => {
@@ -279,18 +309,23 @@ impl WindowsCaptureEngine {
         }
 
         if self.dxgi_backend.is_some() {
-            logging::append_log("INFO", "capture", "retrying primary backend windows-dxgi");
-            self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
-        } else if self.gdi_backend.is_some() {
-            let backend_name = if self.strategy == WindowsCaptureStrategy::RemoteDesktop {
-                "windows-rdp-gdi"
-            } else {
-                "windows-gdi"
-            };
             logging::append_log(
                 "INFO",
                 "capture",
-                format!("retrying backend {backend_name}"),
+                format!(
+                    "retrying primary backend {}",
+                    backend_name_for(self.strategy, WindowsCaptureBackendKind::DxgiDuplication)
+                ),
+            );
+            self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
+        } else if self.gdi_backend.is_some() {
+            logging::append_log(
+                "INFO",
+                "capture",
+                format!(
+                    "retrying backend {}",
+                    backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi)
+                ),
             );
             self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
         }
@@ -389,7 +424,9 @@ impl GdiCaptureBackend {
             *self = replacement;
         }
 
-        let blt_ok = if strategy == WindowsCaptureStrategy::RemoteDesktop {
+        let blt_ok = if strategy == WindowsCaptureStrategy::RemoteDesktopWithDisplay
+            || strategy == WindowsCaptureStrategy::HeadlessNoDisplay
+        {
             unsafe {
                 SetStretchBltMode(self.memory_dc, COLORONCOLOR);
                 StretchBlt(
@@ -422,7 +459,9 @@ impl GdiCaptureBackend {
             }
         };
         if blt_ok == 0 {
-            return Err(if strategy == WindowsCaptureStrategy::RemoteDesktop {
+            return Err(if strategy == WindowsCaptureStrategy::RemoteDesktopWithDisplay
+                || strategy == WindowsCaptureStrategy::HeadlessNoDisplay
+            {
                 "StretchBlt failed".to_owned()
             } else {
                 "BitBlt failed".to_owned()
@@ -587,10 +626,95 @@ fn should_retry_dxgi(error: &str) -> bool {
 }
 
 fn detect_capture_strategy() -> WindowsCaptureStrategy {
-    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 {
-        WindowsCaptureStrategy::RemoteDesktop
+    let remote = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
+    let has_display_output = has_active_display_output();
+
+    let strategy = if remote && has_display_output {
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay
+    } else if remote {
+        WindowsCaptureStrategy::HeadlessNoDisplay
     } else {
         WindowsCaptureStrategy::LocalDisplay
+    };
+
+    match strategy {
+        WindowsCaptureStrategy::LocalDisplay => {
+            logging::append_log("INFO", "capture", "local display session detected");
+        }
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => {
+            logging::append_log(
+                "INFO",
+                "capture",
+                "remote desktop session detected with active display output; probing fast backends first",
+            );
+        }
+        WindowsCaptureStrategy::HeadlessNoDisplay => {
+            logging::append_log(
+                "WARN",
+                "capture",
+                "remote desktop/headless session detected without active display output; fast capture may require a virtual display",
+            );
+        }
+    }
+
+    strategy
+}
+
+fn strategy_name(strategy: WindowsCaptureStrategy) -> &'static str {
+    match strategy {
+        WindowsCaptureStrategy::LocalDisplay => "local-display",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "remote-desktop-with-display",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "headless-no-display",
+    }
+}
+
+fn has_active_display_output() -> bool {
+    let has_screen = Screen::all().map(|screens| !screens.is_empty()).unwrap_or(false);
+    let has_metrics =
+        unsafe { GetSystemMetrics(SM_CXSCREEN) } > 0 && unsafe { GetSystemMetrics(SM_CYSCREEN) } > 0;
+    has_screen || has_metrics
+}
+
+fn preferred_backend_for_strategy(
+    strategy: WindowsCaptureStrategy,
+    dxgi_available: bool,
+) -> WindowsCaptureBackendKind {
+    if dxgi_available {
+        return WindowsCaptureBackendKind::DxgiDuplication;
+    }
+
+    match strategy {
+        WindowsCaptureStrategy::LocalDisplay | WindowsCaptureStrategy::RemoteDesktopWithDisplay => {
+            WindowsCaptureBackendKind::Win32Gdi
+        }
+        WindowsCaptureStrategy::HeadlessNoDisplay => WindowsCaptureBackendKind::ScreenshotsFallback,
+    }
+}
+
+fn screenshots_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
+    match strategy {
+        WindowsCaptureStrategy::LocalDisplay => "windows-screenshots-fallback",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-screenshots-fallback",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-screenshots-fallback",
+    }
+}
+
+fn backend_name_for(
+    strategy: WindowsCaptureStrategy,
+    backend: WindowsCaptureBackendKind,
+) -> &'static str {
+    match backend {
+        WindowsCaptureBackendKind::DxgiDuplication => match strategy {
+            WindowsCaptureStrategy::LocalDisplay => "windows-dxgi",
+            WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-dxgi",
+            WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-dxgi",
+        },
+        WindowsCaptureBackendKind::Win32Gdi => match strategy {
+            WindowsCaptureStrategy::LocalDisplay => "windows-gdi",
+            WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-gdi",
+            WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-gdi",
+        },
+        WindowsCaptureBackendKind::ScreenshotsFallback => "windows-screenshots-fallback",
     }
 }
 
@@ -600,7 +724,7 @@ fn desired_capture_size(
     max_dimensions: (u32, u32),
     strategy: WindowsCaptureStrategy,
 ) -> (i32, i32) {
-    if strategy != WindowsCaptureStrategy::RemoteDesktop {
+    if strategy == WindowsCaptureStrategy::LocalDisplay {
         return (source_width, source_height);
     }
 
