@@ -409,6 +409,9 @@ const DEFAULT_SERVER_URL: &str = "http://wiver.bk.local";
 const REMOTE_MOUSE_SCROLL_SCALE: f32 = 24.0;
 const REMOTE_MOVE_INTERVAL_IDLE_MS: u64 = 16;
 const REMOTE_MOVE_INTERVAL_DRAG_MS: u64 = 8;
+const REMOTE_MOVE_INTERVAL_LOW_FPS_IDLE_MS: u64 = 4;
+const REMOTE_MOVE_INTERVAL_LOW_FPS_DRAG_MS: u64 = 0;
+const REMOTE_LOW_FPS_THRESHOLD_MS: u64 = 80;
 
 impl ConsoleApp {
     fn new(cc: &CreationContext<'_>) -> Self {
@@ -1168,6 +1171,36 @@ impl ConsoleApp {
                 Color32::WHITE,
             );
         }
+        if has_live_frame
+            && self.remote_input_captured
+            && let Some(pointer_pos) = self.last_remote_pointer_pos
+            && image_rect.contains(pointer_pos)
+        {
+            painter.circle_filled(
+                pointer_pos,
+                7.0,
+                Color32::from_rgba_unmultiplied(30, 40, 55, 72),
+            );
+            painter.circle_stroke(
+                pointer_pos,
+                7.0,
+                Stroke::new(1.5, Color32::WHITE),
+            );
+            painter.line_segment(
+                [
+                    pointer_pos + Vec2::new(-11.0, 0.0),
+                    pointer_pos + Vec2::new(11.0, 0.0),
+                ],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
+            );
+            painter.line_segment(
+                [
+                    pointer_pos + Vec2::new(0.0, -11.0),
+                    pointer_pos + Vec2::new(0.0, 11.0),
+                ],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
+            );
+        }
         painter.rect_stroke(
             rect,
             CornerRadius::same(8),
@@ -1321,11 +1354,7 @@ impl ConsoleApp {
                         && (image_rect.contains(pos) || self.remote_pointer_button_down.is_some()) =>
                 {
                     self.last_remote_pointer_pos = Some(pos);
-                    let move_interval_ms = if self.remote_pointer_button_down.is_some() {
-                        REMOTE_MOVE_INTERVAL_DRAG_MS
-                    } else {
-                        REMOTE_MOVE_INTERVAL_IDLE_MS
-                    };
+                    let move_interval_ms = self.remote_move_interval_ms();
                     if now_ms().saturating_sub(self.remote_last_move_sent_at_ms) >= move_interval_ms
                     {
                         if let Err(error) =
@@ -1467,6 +1496,22 @@ impl ConsoleApp {
         )?;
         self.remote_last_move_sent_at_ms = now_ms();
         Ok(())
+    }
+
+    fn remote_move_interval_ms(&self) -> u64 {
+        let degraded_video =
+            now_ms().saturating_sub(self.media_last_frame_at_ms) > REMOTE_LOW_FPS_THRESHOLD_MS;
+        if self.remote_pointer_button_down.is_some() {
+            if degraded_video {
+                REMOTE_MOVE_INTERVAL_LOW_FPS_DRAG_MS
+            } else {
+                REMOTE_MOVE_INTERVAL_DRAG_MS
+            }
+        } else if degraded_video {
+            REMOTE_MOVE_INTERVAL_LOW_FPS_IDLE_MS
+        } else {
+            REMOTE_MOVE_INTERVAL_IDLE_MS
+        }
     }
 
     fn send_remote_input_reset(&mut self, server_url: &str, token: &str, session_id: &str) {
