@@ -1025,17 +1025,21 @@ impl ConsoleApp {
                     self.media_last_frame_at_ms = now_ms();
                     self.media_changed_frame_count =
                         self.media_changed_frame_count.saturating_add(1);
-                    logging::append_log(
-                        "DEBUG",
-                        "media.frame",
-                        format!(
-                            "session_id={} codec={:?} bytes={} changed_frames={}",
-                            session_id,
-                            codec,
-                            bytes.len(),
-                            self.media_changed_frame_count
-                        ),
-                    );
+                    if self.media_changed_frame_count <= 5
+                        || self.media_changed_frame_count % 120 == 0
+                    {
+                        logging::append_log(
+                            "DEBUG",
+                            "media.frame",
+                            format!(
+                                "session_id={} codec={:?} bytes={} changed_frames={}",
+                                session_id,
+                                codec,
+                                bytes.len(),
+                                self.media_changed_frame_count
+                            ),
+                        );
+                    }
                     match codec {
                         MediaCodec::H264 => {
                             let (Some(width), Some(height)) = (width, height) else {

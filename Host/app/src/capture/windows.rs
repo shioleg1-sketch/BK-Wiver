@@ -586,25 +586,14 @@ impl GdiCaptureBackend {
             return Err("GetDIBits failed".to_owned());
         }
 
-        let image = ImageBuffer::from_raw(
-            self.capture_width as u32,
-            self.capture_height as u32,
-            self.bgra.clone(),
-        );
-        Ok(
-            if self.capture_width as u32 == max_dimensions.0
-                && self.capture_height as u32 == max_dimensions.1
-            {
-                image.ok_or_else(|| "failed to build BGRA frame".to_owned())?
-            } else {
-                fit_bgra_frame(
-                    self.capture_width as u32,
-                    self.capture_height as u32,
-                    self.bgra.clone(),
-                    max_dimensions,
-                )?
-            },
-        )
+        let capture_width = self.capture_width as u32;
+        let capture_height = self.capture_height as u32;
+        if capture_width == max_dimensions.0 && capture_height == max_dimensions.1 {
+            ImageBuffer::from_raw(capture_width, capture_height, self.bgra.clone())
+                .ok_or_else(|| "failed to build BGRA frame".to_owned())
+        } else {
+            fit_bgra_frame(capture_width, capture_height, self.bgra.clone(), max_dimensions)
+        }
     }
 
     fn create(
