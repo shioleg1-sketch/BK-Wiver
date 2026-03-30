@@ -213,6 +213,34 @@ impl StreamProfile {
         }
     }
 
+    fn adaptive_capture_dimensions(
+        self,
+        backend_hint: Option<&str>,
+        recent_capture_ms: Option<u128>,
+    ) -> (u32, u32) {
+        let base = self.capture_dimensions_for_backend(backend_hint);
+        let Some(backend) = backend_hint else {
+            return base;
+        };
+
+        let is_slow_backend = backend.contains("-gdi") || backend.contains("screenshots");
+        if !is_slow_backend {
+            return base;
+        }
+
+        let Some(capture_ms) = recent_capture_ms else {
+            return base;
+        };
+
+        match (self, capture_ms) {
+            (Self::Sharp, 141..) => (1280, 720),
+            (Self::Sharp, 81..) => (1366, 768),
+            (Self::Balanced, 141..) => (960, 540),
+            (Self::Balanced, 81..) => (1024, 576),
+            _ => base,
+        }
+    }
+
     fn target_frame_interval(self) -> Duration {
         Duration::from_secs_f64(1.0 / self.target_fps() as f64)
     }
@@ -642,36 +670,44 @@ pub fn spawn_stream(
             let mut capture_engine = CaptureEngine::new();
             let mut dropped_stale_frames = 0u64;
             let mut last_backend_hint: Option<&'static str> = None;
-            let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32))> = None;
+            let mut last_capture_ms: Option<u128> = None;
+            let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32), Option<&'static str>)> = None;
 
             while !stop_capture.load(Ordering::Relaxed) {
                 let stream_profile = capture_profile
                     .lock()
                     .map(|guard| *guard)
                     .unwrap_or(StreamProfile::Balanced);
-                let capture_dimensions =
-                    stream_profile.capture_dimensions_for_backend(last_backend_hint);
-                if last_logged_dimensions != Some((stream_profile, capture_dimensions)) {
+                let capture_dimensions = stream_profile
+                    .adaptive_capture_dimensions(last_backend_hint, last_capture_ms);
+                if last_logged_dimensions
+                    != Some((stream_profile, capture_dimensions, last_backend_hint))
+                {
                     if capture_dimensions != stream_profile.max_dimensions() {
                         logging::append_log(
                             "INFO",
                             "media.profile",
                             format!(
-                                "session_id={} profile={} backend_hint={} tuned_capture={}x{}",
+                                "session_id={} profile={} backend_hint={} recent_capture_ms={} tuned_capture={}x{}",
                                 capture_session_id,
                                 stream_profile.wire_name(),
                                 last_backend_hint.unwrap_or("unknown"),
+                                last_capture_ms
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "unknown".to_owned()),
                                 capture_dimensions.0,
                                 capture_dimensions.1
                             ),
                         );
                     }
-                    last_logged_dimensions = Some((stream_profile, capture_dimensions));
+                    last_logged_dimensions =
+                        Some((stream_profile, capture_dimensions, last_backend_hint));
                 }
                 let capture_started = Instant::now();
                 let captured = capture_engine.capture(capture_dimensions, frame_index);
                 let capture_ms = capture_started.elapsed().as_millis();
                 last_backend_hint = Some(captured.backend);
+                last_capture_ms = Some(capture_ms);
 
                 if captured.used_fallback && frame_index % 60 == 1 {
                     logging::append_log(
