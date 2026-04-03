@@ -1,0 +1,5 @@
+# Taplo configuration for TOML formatting
+# https://taplo.tamasfe.dev/configuration/
+
+include = ["**/*.toml"]
+exclude = ["target/**"]
