@@ -114,23 +114,28 @@ pub(crate) fn build_test_frame(frame_index: u32) -> RgbaImage {
     const TEST_FRAME_HEIGHT: u32 = 540;
 
     let mut image: RgbaImage = ImageBuffer::new(TEST_FRAME_WIDTH, TEST_FRAME_HEIGHT);
-    let shift = (frame_index * 13) % TEST_FRAME_WIDTH;
-    let pulse = ((frame_index * 17) % 255) as u8;
+    let shift = (frame_index * 9) % TEST_FRAME_WIDTH;
+    let pulse = ((frame_index * 11) % 255) as u8;
 
     for (x, y, pixel) in image.enumerate_pixels_mut() {
-        let r = (((x + shift) % TEST_FRAME_WIDTH) * 255 / TEST_FRAME_WIDTH) as u8;
-        let g = ((y * 255) / TEST_FRAME_HEIGHT) as u8;
-        let mut b = pulse;
-
-        if x > shift.saturating_sub(28) && x < (shift + 28).min(TEST_FRAME_WIDTH) {
-            b = 240;
-        }
-
         let border = x < 6 || y < 6 || x > TEST_FRAME_WIDTH - 7 || y > TEST_FRAME_HEIGHT - 7;
+        let header = y < 72;
+        let footer = y > TEST_FRAME_HEIGHT.saturating_sub(72);
+        let moving_band = x > shift.saturating_sub(40) && x < (shift + 40).min(TEST_FRAME_WIDTH);
+        let checker = ((x / 32) + (y / 32)) % 2 == 0;
+
         *pixel = if border {
-            Rgba([220, 226, 233, 255])
+            Rgba([245, 248, 252, 255])
+        } else if header {
+            Rgba([190, 42, 52, 255])
+        } else if footer {
+            Rgba([34, 39, 46, 255])
+        } else if moving_band {
+            Rgba([255, 214, 10, 255])
+        } else if checker {
+            Rgba([46, 134, 171, 255])
         } else {
-            Rgba([r, g, b, 255])
+            Rgba([18, pulse.max(40), 92, 255])
         };
     }
 

@@ -496,6 +496,98 @@ pub fn describe_dxgi_adapters_and_outputs() -> WindowsResult<Vec<String>> {
     Ok(lines)
 }
 
+/// Returns detailed step-by-step DXGI initialization diagnostics for a capture source index.
+pub fn describe_dxgi_initialization_attempts(
+    capture_source_index: usize,
+) -> WindowsResult<Vec<String>> {
+    let factory = create_dxgi_factory_1()?;
+    let mut lines = Vec::new();
+
+    for adapter_index in 0.. {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(e) => return Err(e),
+        };
+
+        let desc: DXGI_ADAPTER_DESC1 = unsafe { adapter.GetDesc1()? };
+        let adapter_name = wide_to_string(&desc.Description);
+        lines.push(format!(
+            "attempt adapter[{}] name=\"{}\" vendor_id={} device_id={} flags=0x{:x}",
+            adapter_index, adapter_name, desc.VendorId, desc.DeviceId, desc.Flags
+        ));
+
+        let (_device, _device_context) = match d3d11_create_device(Some(&adapter.cast()?)) {
+            Ok(device) => {
+                lines.push(format!("attempt adapter[{}] d3d11_create_device=ok", adapter_index));
+                device
+            }
+            Err(error) => {
+                lines.push(format!(
+                    "attempt adapter[{}] d3d11_create_device=failed error={}",
+                    adapter_index, error
+                ));
+                continue;
+            }
+        };
+
+        let output = match get_output_at_index(&adapter, capture_source_index)? {
+            Some(output) => {
+                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc()? };
+                let output_name = wide_to_string(&output_desc.DeviceName);
+                let rect = output_desc.DesktopCoordinates;
+                lines.push(format!(
+                    "attempt adapter[{}] output index={} name=\"{}\" attached={} rect=({}, {})-({}, {}) rotation={:?}",
+                    adapter_index,
+                    capture_source_index,
+                    output_name,
+                    output_desc.AttachedToDesktop.as_bool(),
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    output_desc.Rotation
+                ));
+                output
+            }
+            None => {
+                lines.push(format!(
+                    "attempt adapter[{}] output index={} not_found",
+                    adapter_index, capture_source_index
+                ));
+                continue;
+            }
+        };
+
+        let output1: IDXGIOutput1 = match output.cast() {
+            Ok(output1) => {
+                lines.push(format!("attempt adapter[{}] output_cast=ok", adapter_index));
+                output1
+            }
+            Err(error) => {
+                lines.push(format!(
+                    "attempt adapter[{}] output_cast=failed error={}",
+                    adapter_index, error
+                ));
+                continue;
+            }
+        };
+
+        match unsafe { output1.DuplicateOutput(&_device) } {
+            Ok(_) => lines.push(format!(
+                "attempt adapter[{}] duplicate_output=ok",
+                adapter_index
+            )),
+            Err(error) => lines.push(format!(
+                "attempt adapter[{}] duplicate_output=failed error={}",
+                adapter_index, error
+            )),
+        }
+    }
+
+    Ok(lines)
+}
+
 /// Maps a Windows error from a capture operation into the appropriate
 /// [`CaptureError`] variant.
 fn map_capture_error(e: windows::core::Error) -> CaptureError {

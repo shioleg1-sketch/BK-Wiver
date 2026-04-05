@@ -1,4 +1,7 @@
-use dxgi_capture_rs::{CaptureError, DXGIManager, describe_dxgi_adapters_and_outputs};
+use dxgi_capture_rs::{
+    CaptureError, DXGIManager, describe_dxgi_adapters_and_outputs,
+    describe_dxgi_initialization_attempts,
+};
 use image::{ImageBuffer, RgbaImage};
 use screenshots::Screen;
 use std::time::Duration;
@@ -303,6 +306,27 @@ fn log_dxgi_environment() {
             "WARN",
             "capture.dxgi_probe",
             format!("failed to enumerate dxgi adapters/outputs: {}", error),
+        ),
+    }
+
+    match describe_dxgi_initialization_attempts(0) {
+        Ok(lines) => {
+            if lines.is_empty() {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi_probe",
+                    "dxgi initialization probe returned no attempts",
+                );
+            } else {
+                for line in lines {
+                    logging::append_log("INFO", "capture.dxgi_probe", line);
+                }
+            }
+        }
+        Err(error) => logging::append_log(
+            "WARN",
+            "capture.dxgi_probe",
+            format!("failed to probe dxgi initialization attempts: {}", error),
         ),
     }
 }
