@@ -1110,16 +1110,23 @@ pub fn spawn_stream(
                                     let mut sent_packets_this_frame = 0u64;
                                     let mut sent_bytes_this_frame = 0usize;
 
-                                    // Fix 1: Debounce dimension changes
+                                    // Fix 1: Debounce dimension changes — but don't skip frames entirely
+                                    // Only restart encoder if dimensions changed, otherwise reuse
                                     let frame_dims = (frame.width, frame.height);
-                                    if pending_dimensions != Some(frame_dims) {
+                                    let encoder_needs_restart = h264_encoder
+                                        .as_ref()
+                                        .map(|e| !e.matches(frame.width, frame.height))
+                                        .unwrap_or(true);
+
+                                    if encoder_needs_restart && pending_dimensions != Some(frame_dims) {
                                         pending_dimensions = Some(frame_dims);
                                         pending_dimensions_frame_count = 0;
                                     }
                                     pending_dimensions_frame_count += 1;
 
-                                    if pending_dimensions_frame_count < DIMENSION_DEBOUNCE_FRAMES {
-                                        // Dimensions haven't stabilized yet — skip encoding
+                                    // Only skip if we're about to restart encoder AND haven't stabilized
+                                    if encoder_needs_restart && pending_dimensions_frame_count < 3 {
+                                        // Skip max 2 frames during encoder restart
                                         continue;
                                     }
 
