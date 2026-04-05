@@ -5,6 +5,34 @@ use dxgi_capture_rs::{
 use image::{ImageBuffer, RgbaImage};
 use screenshots::Screen;
 use std::time::Duration;
+use windows::{
+    Graphics::{
+        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
+        DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
+    },
+    Win32::{
+        Foundation::POINT,
+        Graphics::{
+            Direct3D::{
+                D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_9_1,
+            },
+            Direct3D11::{
+                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+                D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+                ID3D11Texture2D,
+            },
+            Dxgi::{Common::DXGI_SAMPLE_DESC, IDXGIDevice},
+            Gdi::{HMONITOR, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
+        },
+        System::WinRT::{
+            Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
+            Graphics::Capture::IGraphicsCaptureItemInterop,
+        },
+    },
+    core::{Interface, factory},
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SM_REMOTESESSION,
 };
@@ -13,7 +41,7 @@ use crate::logging;
 
 use super::{
     CaptureFrame,
-    common::{ScreenshotsCaptureBackend, build_test_frame, fit_frame},
+    common::{build_test_frame, fit_frame},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,7 +61,7 @@ enum CaptureAvailabilityState {
 pub struct WindowsCaptureEngine {
     strategy: WindowsCaptureStrategy,
     dxgi_backend: Option<DxgiCaptureBackend>,
-    screenshots_backend: Option<ScreenshotsCaptureBackend>,
+    wgc_backend: Option<WgcCaptureBackend>,
     availability_state: CaptureAvailabilityState,
     consecutive_slow_dxgi_frames: u32,
     next_retry_frame: u32,
@@ -57,14 +85,31 @@ impl WindowsCaptureEngine {
                 None
             }
         };
-        let screenshots_backend = if dxgi_backend.is_none() {
-            init_screenshots_backend(strategy)
+        let wgc_backend = if dxgi_backend.is_none() {
+            match WgcCaptureBackend::new() {
+                Ok(backend) => {
+                    logging::append_log(
+                        "INFO",
+                        "capture.wgc",
+                        format!("initialized backend={}", wgc_backend_name_for(strategy)),
+                    );
+                    Some(backend)
+                }
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "capture.wgc",
+                        format!("initialization failed: {}", error),
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
         let availability_state = if dxgi_backend.is_some() {
             CaptureAvailabilityState::Ready
-        } else if screenshots_backend.is_some() {
+        } else if wgc_backend.is_some() {
             CaptureAvailabilityState::Ready
         } else {
             unavailable_state_for(strategy)
@@ -93,7 +138,7 @@ impl WindowsCaptureEngine {
         Self {
             strategy,
             dxgi_backend,
-            screenshots_backend,
+            wgc_backend,
             availability_state,
             consecutive_slow_dxgi_frames: 0,
             next_retry_frame: 120,
@@ -142,11 +187,19 @@ impl WindowsCaptureEngine {
             }
         }
 
-        if let Some(backend) = self.screenshots_backend.as_mut() {
-            let frame = backend.capture(max_dimensions, frame_index);
-            if !frame.used_fallback {
-                self.availability_state = CaptureAvailabilityState::Ready;
-                return frame;
+        if let Some(backend) = self.wgc_backend.as_mut() {
+            match backend.capture(max_dimensions, frame_index) {
+                Ok(image) => {
+                    self.availability_state = CaptureAvailabilityState::Ready;
+                    return self.capture_frame(image, wgc_backend_name_for(self.strategy), false, frame_index);
+                }
+                Err(error) => {
+                    logging::append_log(
+                        "WARN",
+                        "capture.wgc",
+                        format!("frame capture failed: {}", error),
+                    );
+                }
             }
         }
 
@@ -210,7 +263,7 @@ impl WindowsCaptureEngine {
         };
 
         if self.dxgi_backend.is_some() {
-            self.screenshots_backend = None;
+            self.wgc_backend = None;
             logging::append_log(
                 "INFO",
                 "capture",
@@ -220,10 +273,27 @@ impl WindowsCaptureEngine {
             self.reset_retry_backoff(frame_index);
             true
         } else {
-            if self.screenshots_backend.is_none() {
-                self.screenshots_backend = init_screenshots_backend(self.strategy);
+            if self.wgc_backend.is_none() {
+                self.wgc_backend = match WgcCaptureBackend::new() {
+                    Ok(backend) => {
+                        logging::append_log(
+                            "INFO",
+                            "capture.wgc",
+                            format!("reinitialized backend={}", wgc_backend_name_for(self.strategy)),
+                        );
+                        Some(backend)
+                    }
+                    Err(error) => {
+                        logging::append_log(
+                            "WARN",
+                            "capture.wgc",
+                            format!("reinitialization failed: {}", error),
+                        );
+                        None
+                    }
+                };
             }
-            if self.screenshots_backend.is_some() {
+            if self.wgc_backend.is_some() {
                 self.availability_state = CaptureAvailabilityState::Ready;
             } else {
                 self.availability_state = unavailable_state_for(self.strategy);
@@ -361,6 +431,200 @@ struct DxgiCaptureBackend {
     source_index: usize,
     last_frame: Option<RgbaImage>,
     last_frame_index: u32,
+}
+
+struct WgcCaptureBackend {
+    _d3d_device: ID3D11Device,
+    d3d_context: ID3D11DeviceContext,
+    frame_pool: Direct3D11CaptureFramePool,
+    _session: GraphicsCaptureSession,
+    _item: GraphicsCaptureItem,
+    staging_texture: Option<ID3D11Texture2D>,
+    staging_dimensions: (u32, u32),
+    last_frame: Option<RgbaImage>,
+    last_frame_index: u32,
+}
+
+impl WgcCaptureBackend {
+    fn new() -> Result<Self, String> {
+        let _ = windows::core::initialize_mta().map_err(|error| error.to_string())?;
+        if !GraphicsCaptureSession::IsSupported().map_err(|error| error.to_string())? {
+            return Err("Windows Graphics Capture is not supported".to_owned());
+        }
+
+        let monitor = primary_monitor_handle()?;
+        let item_interop: IGraphicsCaptureItemInterop =
+            factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .map_err(|error| error.to_string())?;
+        let item = unsafe {
+            item_interop
+                .CreateForMonitor::<GraphicsCaptureItem>(monitor)
+                .map_err(|error| error.to_string())?
+        };
+
+        let mut d3d_device = None;
+        let mut d3d_context = None;
+        let feature_levels = [
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_9_1,
+        ];
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut d3d_device),
+                None,
+                Some(&mut d3d_context),
+            )
+        }
+        .map_err(|error| error.to_string())?;
+
+        let d3d_device = d3d_device.ok_or_else(|| "missing D3D11 device".to_owned())?;
+        let d3d_context = d3d_context.ok_or_else(|| "missing D3D11 device context".to_owned())?;
+        let dxgi_device: IDXGIDevice = d3d_device.cast().map_err(|error| error.to_string())?;
+        let inspectable = unsafe {
+            CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device).map_err(|error| error.to_string())?
+        };
+        let winrt_device: IDirect3DDevice =
+            inspectable.cast().map_err(|error| error.to_string())?;
+
+        let size = item.Size().map_err(|error| error.to_string())?;
+        let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &winrt_device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            2,
+            size,
+        )
+        .map_err(|error| error.to_string())?;
+        let session = frame_pool
+            .CreateCaptureSession(&item)
+            .map_err(|error| error.to_string())?;
+        let _ = session.SetIsCursorCaptureEnabled(true);
+        let _ = session.SetIsBorderRequired(false);
+        session.StartCapture().map_err(|error| error.to_string())?;
+
+        Ok(Self {
+            _d3d_device: d3d_device,
+            d3d_context,
+            frame_pool,
+            _session: session,
+            _item: item,
+            staging_texture: None,
+            staging_dimensions: (0, 0),
+            last_frame: None,
+            last_frame_index: 0,
+        })
+    }
+
+    fn capture(
+        &mut self,
+        max_dimensions: (u32, u32),
+        frame_index: u32,
+    ) -> Result<RgbaImage, String> {
+        let frame = match self.frame_pool.TryGetNextFrame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                return self
+                    .last_frame
+                    .clone()
+                    .ok_or_else(|| format!("wgc frame unavailable before first frame: {}", error));
+            }
+        };
+
+        let content_size = frame.ContentSize().map_err(|error| error.to_string())?;
+        let surface = frame.Surface().map_err(|error| error.to_string())?;
+        let access: IDirect3DDxgiInterfaceAccess =
+            surface.cast().map_err(|error| error.to_string())?;
+        let source_texture: ID3D11Texture2D =
+            unsafe { access.GetInterface() }.map_err(|error| error.to_string())?;
+
+        let staging_texture =
+            self.ensure_staging_texture(&source_texture, content_size.Width as u32, content_size.Height as u32)?;
+
+        unsafe {
+            self.d3d_context.CopyResource(staging_texture, &source_texture);
+        }
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.d3d_context
+                .Map(staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let width = content_size.Width.max(1) as usize;
+        let height = content_size.Height.max(1) as usize;
+        let row_pitch = mapped.RowPitch as usize;
+        let data_ptr = mapped.pData as *const u8;
+        let mut bgra = vec![0_u8; width * height * 4];
+        for row in 0..height {
+            let src_row = unsafe { std::slice::from_raw_parts(data_ptr.add(row * row_pitch), width * 4) };
+            let dst_offset = row * width * 4;
+            bgra[dst_offset..dst_offset + (width * 4)].copy_from_slice(src_row);
+        }
+
+        unsafe {
+            self.d3d_context.Unmap(staging_texture, 0);
+        }
+
+        let image = if width as u32 == max_dimensions.0 && height as u32 == max_dimensions.1 {
+            ImageBuffer::from_raw(width as u32, height as u32, bgra)
+                .ok_or_else(|| "failed to build WGC frame".to_owned())?
+        } else {
+            fit_bgra_frame(width as u32, height as u32, bgra, max_dimensions)?
+        };
+
+        if self.last_frame.is_none()
+            || frame_index.wrapping_sub(self.last_frame_index) >= 30
+        {
+            self.last_frame = Some(image.clone());
+            self.last_frame_index = frame_index;
+        }
+
+        let _ = frame.Close();
+        Ok(image)
+    }
+
+    fn ensure_staging_texture(
+        &mut self,
+        source_texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> Result<&ID3D11Texture2D, String> {
+        if self.staging_texture.is_none() || self.staging_dimensions != (width, height) {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe {
+                source_texture.GetDesc(&mut desc);
+            }
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+
+            let mut texture = None;
+            unsafe {
+                self._d3d_device
+                    .CreateTexture2D(&desc, None, Some(&mut texture))
+                    .map_err(|error| error.to_string())?;
+            }
+            self.staging_texture = texture;
+            self.staging_dimensions = (width, height);
+        }
+
+        self.staging_texture
+            .as_ref()
+            .ok_or_else(|| "missing WGC staging texture".to_owned())
+    }
 }
 
 impl DxgiCaptureBackend {
@@ -520,29 +784,12 @@ fn unavailable_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static st
     availability_name_for(strategy, unavailable_state_for(strategy))
 }
 
-fn screenshots_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
+fn wgc_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
     match strategy {
-        WindowsCaptureStrategy::LocalDisplay => "windows-screenshots",
-        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-screenshots",
-        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-screenshots",
+        WindowsCaptureStrategy::LocalDisplay => "windows-wgc",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-wgc",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-wgc",
     }
-}
-
-fn init_screenshots_backend(strategy: WindowsCaptureStrategy) -> Option<ScreenshotsCaptureBackend> {
-    let backend = ScreenshotsCaptureBackend::with_backend_name(screenshots_backend_name_for(strategy));
-    if backend.backend_name().is_empty() {
-        return None;
-    }
-
-    logging::append_log(
-        "WARN",
-        "capture",
-        format!(
-            "using screenshots fallback backend={} while DXGI is unavailable",
-            backend.backend_name()
-        ),
-    );
-    Some(backend)
 }
 
 fn unavailable_state_for(strategy: WindowsCaptureStrategy) -> CaptureAvailabilityState {
@@ -581,5 +828,14 @@ fn availability_name_for(
             WindowsCaptureStrategy::HeadlessNoDisplay,
             CaptureAvailabilityState::CaptureUnavailable,
         ) => "windows-headless-dxgi-unavailable",
+    }
+}
+
+fn primary_monitor_handle() -> Result<HMONITOR, String> {
+    let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    if monitor.0.is_null() {
+        Err("primary monitor handle is null".to_owned())
+    } else {
+        Ok(monitor)
     }
 }
