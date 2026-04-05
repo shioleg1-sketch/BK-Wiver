@@ -1,4 +1,4 @@
-use dxgi_capture_rs::{CaptureError, DXGIManager};
+use dxgi_capture_rs::{CaptureError, DXGIManager, describe_dxgi_adapters_and_outputs};
 use image::{ImageBuffer, RgbaImage};
 use screenshots::Screen;
 use std::time::Duration;
@@ -41,6 +41,7 @@ impl WindowsCaptureEngine {
                     "capture.dxgi",
                     format!("initialization failed: {}", error),
                 );
+                log_dxgi_environment();
                 None
             }
         };
@@ -265,6 +266,25 @@ impl WindowsCaptureEngine {
         }
 
         self.consecutive_slow_dxgi_frames = 0;
+    }
+}
+
+fn log_dxgi_environment() {
+    match describe_dxgi_adapters_and_outputs() {
+        Ok(lines) => {
+            if lines.is_empty() {
+                logging::append_log("WARN", "capture.dxgi", "dxgi environment probe returned no adapters");
+            } else {
+                for line in lines {
+                    logging::append_log("INFO", "capture.dxgi_probe", line);
+                }
+            }
+        }
+        Err(error) => logging::append_log(
+            "WARN",
+            "capture.dxgi_probe",
+            format!("failed to enumerate dxgi adapters/outputs: {}", error),
+        ),
     }
 }
 

@@ -167,9 +167,9 @@ use windows::{
                 },
                 CreateDXGIFactory1, DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST,
                 DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
-                DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTPUT_DESC, IDXGIAdapter,
-                IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication,
-                IDXGIResource, IDXGISurface1,
+                DXGI_ADAPTER_DESC1, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
+                DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+                IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface1,
             },
         },
     },
@@ -430,6 +430,70 @@ fn get_output_at_index(
         }
     }
     Ok(None)
+}
+
+fn wide_to_string(wide: &[u16]) -> String {
+    let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+    String::from_utf16_lossy(&wide[..end])
+}
+
+/// Returns a human-readable list of DXGI adapters and outputs visible to the process.
+pub fn describe_dxgi_adapters_and_outputs() -> WindowsResult<Vec<String>> {
+    let factory = create_dxgi_factory_1()?;
+    let mut lines = Vec::new();
+
+    for adapter_index in 0.. {
+        let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
+            Ok(adapter) => adapter,
+            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(e) => return Err(e),
+        };
+
+        let desc: DXGI_ADAPTER_DESC1 = unsafe { adapter.GetDesc1()? };
+        let adapter_name = wide_to_string(&desc.Description);
+        lines.push(format!(
+            "adapter[{}] name=\"{}\" vendor_id={} device_id={} flags=0x{:x}",
+            adapter_index, adapter_name, desc.VendorId, desc.DeviceId, desc.Flags
+        ));
+
+        let mut attached_output_count = 0usize;
+        for output_index in 0.. {
+            let output = match unsafe { adapter.EnumOutputs(output_index) } {
+                Ok(output) => output,
+                Err(_) => break,
+            };
+
+            let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc()? };
+            let output_name = wide_to_string(&output_desc.DeviceName);
+            let rect = output_desc.DesktopCoordinates;
+            let attached = output_desc.AttachedToDesktop.as_bool();
+            if attached {
+                attached_output_count += 1;
+            }
+
+            lines.push(format!(
+                "adapter[{}].output[{}] name=\"{}\" attached={} rect=({}, {})-({}, {}) rotation={:?}",
+                adapter_index,
+                output_index,
+                output_name,
+                attached,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                output_desc.Rotation
+            ));
+        }
+
+        if attached_output_count == 0 {
+            lines.push(format!(
+                "adapter[{}] attached_output_count=0",
+                adapter_index
+            ));
+        }
+    }
+
+    Ok(lines)
 }
 
 /// Maps a Windows error from a capture operation into the appropriate
