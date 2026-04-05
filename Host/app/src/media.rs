@@ -842,14 +842,28 @@ pub fn spawn_stream(
             let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32), Option<&'static str>)> = None;
             // Improvement 3: screen change detection
             let mut prev_frame_hash: Option<u64> = None;
+            // Fix 3: Minimum frames between dimension changes to prevent oscillation
+            let mut frames_since_dimension_change = 0u32;
+            let mut last_capture_dimensions: Option<(u32, u32)> = None;
+            const MIN_FRAMES_BETWEEN_DIMENSION_CHANGES: u32 = 60; // At least 2 seconds at 30fps
 
             while !stop_capture.load(Ordering::Relaxed) {
                 let stream_profile = capture_profile
                     .lock()
                     .map(|guard| *guard)
                     .unwrap_or(StreamProfile::Balanced);
-                let capture_dimensions = stream_profile
-                    .adaptive_capture_dimensions(last_backend_hint, smoothed_capture_ms);
+
+                // Fix 3: Enforce minimum frames between dimension changes
+                frames_since_dimension_change += 1;
+                let capture_dimensions = if frames_since_dimension_change < MIN_FRAMES_BETWEEN_DIMENSION_CHANGES {
+                    // Use previous dimensions to avoid oscillation
+                    last_capture_dimensions.unwrap_or(stream_profile.max_dimensions())
+                } else {
+                    let dims = stream_profile.adaptive_capture_dimensions(last_backend_hint, smoothed_capture_ms);
+                    last_capture_dimensions = Some(dims);
+                    frames_since_dimension_change = 0;
+                    dims
+                };
                 if last_logged_dimensions
                     != Some((stream_profile, capture_dimensions, last_backend_hint))
                 {
@@ -988,6 +1002,16 @@ pub fn spawn_stream(
                         let mut auto_retry_h264_after: Option<Instant> = None;
                         let stream_start = Instant::now();
 
+                        // Fix 1: Debounce dimension changes — only restart encoder if
+                        // dimensions have been stable for DIMENSION_DEBOUNCE_FRAMES frames.
+                        let mut pending_dimensions: Option<(u32, u32)> = None;
+                        let mut pending_dimensions_frame_count = 0u32;
+                        const DIMENSION_DEBOUNCE_FRAMES: u32 = 30; // ~1s at 30fps
+
+                        // Fix 2: Encoder warmup — drop first N frames after restart.
+                        let mut encoder_warmup_frames = 0u32;
+                        const ENCODER_WARMUP_FRAMES: u32 = 5;
+
                         logging::append_log(
                             "INFO",
                             "media",
@@ -1082,6 +1106,20 @@ pub fn spawn_stream(
                                 StreamCodec::H264 => {
                                     let mut sent_packets_this_frame = 0u64;
                                     let mut sent_bytes_this_frame = 0usize;
+
+                                    // Fix 1: Debounce dimension changes
+                                    let frame_dims = (frame.width, frame.height);
+                                    if pending_dimensions != Some(frame_dims) {
+                                        pending_dimensions = Some(frame_dims);
+                                        pending_dimensions_frame_count = 0;
+                                    }
+                                    pending_dimensions_frame_count += 1;
+
+                                    if pending_dimensions_frame_count < DIMENSION_DEBOUNCE_FRAMES {
+                                        // Dimensions haven't stabilized yet — skip encoding
+                                        continue;
+                                    }
+
                                     if let Err(error) = ensure_h264_encoder_hw(
                                         &mut h264_encoder,
                                         frame.width,
@@ -1117,7 +1155,16 @@ pub fn spawn_stream(
                                             }
                                         }
                                     } else {
+                                        // Fix 2: Mark warmup period after encoder (re)start
+                                        encoder_warmup_frames = ENCODER_WARMUP_FRAMES;
+
                                         if let Some(encoder) = &mut h264_encoder {
+                                            // Fix 2: Drop warmup frames — encoder may produce 0 packets initially
+                                            if encoder_warmup_frames > 0 {
+                                                encoder_warmup_frames -= 1;
+                                                continue;
+                                            }
+
                                             if encoder.push_raw(&frame.data).is_ok() {
                                                 let packets = encoder.drain_packets();
                                                 if !packets.is_empty() && !h264_config_sent {
