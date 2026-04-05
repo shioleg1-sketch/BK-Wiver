@@ -40,6 +40,8 @@ pub struct WindowsCaptureEngine {
     dxgi_backend: Option<DxgiCaptureBackend>,
     gdi_backend: Option<GdiCaptureBackend>,
     consecutive_slow_dxgi_frames: u32,
+    next_primary_retry_frame: u32,
+    primary_retry_interval_frames: u32,
     screenshots_fallback: ScreenshotsCaptureBackend,
     last_successful_frame: Option<RgbaImage>,
     last_successful_frame_index: u32,
@@ -101,6 +103,8 @@ impl WindowsCaptureEngine {
             dxgi_backend,
             gdi_backend,
             consecutive_slow_dxgi_frames: 0,
+            next_primary_retry_frame: 120,
+            primary_retry_interval_frames: 120,
             screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
                 screenshots_backend_name,
             ),
@@ -110,16 +114,13 @@ impl WindowsCaptureEngine {
     }
 
     pub fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> CaptureFrame {
-        if self.preferred_backend == WindowsCaptureBackendKind::ScreenshotsFallback
-            && frame_index % 120 == 0
+        if matches!(
+            self.preferred_backend,
+            WindowsCaptureBackendKind::ScreenshotsFallback | WindowsCaptureBackendKind::Win32Gdi
+        ) && frame_index >= self.next_primary_retry_frame
         {
-            self.try_restore_primary_backends();
-        }
-        if self.preferred_backend == WindowsCaptureBackendKind::Win32Gdi
-            && frame_index % 120 == 0
-        {
-            self.try_restore_primary_backends();
-            if self.preferred_backend != WindowsCaptureBackendKind::Win32Gdi {
+            let restored = self.try_restore_primary_backends(frame_index);
+            if restored && self.preferred_backend != WindowsCaptureBackendKind::Win32Gdi {
                 return self.capture(max_dimensions, frame_index);
             }
         }
@@ -137,6 +138,7 @@ impl WindowsCaptureEngine {
                     match result {
                         Ok(image) => {
                             self.handle_dxgi_capture_timing(capture_elapsed);
+                            self.reset_primary_retry_backoff(frame_index);
                             self.capture_frame(
                                 image,
                                 backend_name_for(
@@ -301,9 +303,17 @@ impl WindowsCaptureEngine {
         }
     }
 
-    fn try_restore_primary_backends(&mut self) {
+    fn try_restore_primary_backends(&mut self, frame_index: u32) -> bool {
+        let preferred_source_index = self
+            .dxgi_backend
+            .as_ref()
+            .map(DxgiCaptureBackend::source_index)
+            .unwrap_or(0);
+
         if self.dxgi_backend.is_none() {
-            self.dxgi_backend = match DxgiCaptureBackend::new() {
+            self.dxgi_backend = match DxgiCaptureBackend::with_preferred_source_index(
+                preferred_source_index,
+            ) {
                 Ok(backend) => Some(backend),
                 Err(error) => {
                     logging::append_log(
@@ -340,6 +350,8 @@ impl WindowsCaptureEngine {
                 ),
             );
             self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
+            self.reset_primary_retry_backoff(frame_index);
+            true
         } else if self.gdi_backend.is_some() {
             logging::append_log(
                 "INFO",
@@ -350,7 +362,23 @@ impl WindowsCaptureEngine {
                 ),
             );
             self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
+            self.bump_primary_retry_backoff(frame_index);
+            false
+        } else {
+            self.bump_primary_retry_backoff(frame_index);
+            false
         }
+    }
+
+    fn reset_primary_retry_backoff(&mut self, frame_index: u32) {
+        self.primary_retry_interval_frames = 120;
+        self.next_primary_retry_frame = frame_index.saturating_add(self.primary_retry_interval_frames);
+    }
+
+    fn bump_primary_retry_backoff(&mut self, frame_index: u32) {
+        self.primary_retry_interval_frames =
+            (self.primary_retry_interval_frames.saturating_mul(2)).clamp(120, 960);
+        self.next_primary_retry_frame = frame_index.saturating_add(self.primary_retry_interval_frames);
     }
 
     fn handle_dxgi_capture_timing(&mut self, elapsed: Duration) {
@@ -419,19 +447,40 @@ impl WindowsCaptureEngine {
 
 struct DxgiCaptureBackend {
     manager: DXGIManager,
+    source_index: usize,
     last_frame: Option<RgbaImage>,
     last_frame_index: u32,
 }
 
 impl DxgiCaptureBackend {
     fn new() -> Result<Self, String> {
+        Self::with_preferred_source_index(0)
+    }
+
+    fn with_preferred_source_index(preferred_source_index: usize) -> Result<Self, String> {
         let mut manager = DXGIManager::new(16).map_err(|error| error.to_string())?;
-        manager.set_capture_source_index(0);
+        if preferred_source_index > 0 {
+            manager.set_capture_source_index(preferred_source_index);
+        }
+        let source_index = manager.get_capture_source_index();
+        logging::append_log(
+            "INFO",
+            "capture.dxgi",
+            format!(
+                "initialized source_index={} preferred_source_index={}",
+                source_index, preferred_source_index
+            ),
+        );
         Ok(Self {
             manager,
+            source_index,
             last_frame: None,
             last_frame_index: 0,
         })
+    }
+
+    fn source_index(&self) -> usize {
+        self.source_index
     }
 
     fn capture(
@@ -462,7 +511,10 @@ impl DxgiCaptureBackend {
                 .ok_or_else(|| "dxgi frame timeout before first frame".to_owned()),
             Err(CaptureError::AccessLost) => {
                 self.manager = DXGIManager::new(16).map_err(|error| error.to_string())?;
-                self.manager.set_capture_source_index(0);
+                if self.source_index > 0 {
+                    self.manager.set_capture_source_index(self.source_index);
+                }
+                self.source_index = self.manager.get_capture_source_index();
                 self.last_frame
                     .clone()
                     .ok_or_else(|| "dxgi access lost before first frame".to_owned())

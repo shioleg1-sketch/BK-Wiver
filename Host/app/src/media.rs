@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env,
     io::{Read, Write},
     path::PathBuf,
@@ -34,7 +35,6 @@ const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
 const VP8_FRAME_CHUNK_DATA_LEN: usize = 4096;
 
 // Оптимизированные настройки кодеков
-const H264_CRF: u8 = 25;
 const H264_BITRATE: u64 = 5_000_000;
 const VP8_BITRATE: u64 = 3_000_000;
 const VP8_FPS: u32 = 30;
@@ -160,6 +160,32 @@ struct RawFrame {
     captured_at: Instant,
 }
 
+#[derive(Default)]
+struct CaptureTelemetry {
+    samples_ms: VecDeque<u128>,
+}
+
+impl CaptureTelemetry {
+    fn push(&mut self, capture_ms: u128) -> u128 {
+        const MAX_SAMPLES: usize = 12;
+
+        self.samples_ms.push_back(capture_ms);
+        while self.samples_ms.len() > MAX_SAMPLES {
+            let _ = self.samples_ms.pop_front();
+        }
+
+        self.average_ms()
+    }
+
+    fn average_ms(&self) -> u128 {
+        if self.samples_ms.is_empty() {
+            return 0;
+        }
+
+        self.samples_ms.iter().copied().sum::<u128>() / self.samples_ms.len() as u128
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MediaPacketKind {
     Config,
@@ -240,10 +266,14 @@ impl StreamProfile {
         };
 
         match (self, capture_ms) {
-            (Self::Sharp, 141..) => (1280, 720),
+            (Self::Sharp, 181..) => (1152, 648),
+            (Self::Sharp, 121..) => (1280, 720),
             (Self::Sharp, 81..) => (1366, 768),
-            (Self::Balanced, 141..) => (960, 540),
+            (Self::Balanced, 181..) => (854, 480),
+            (Self::Balanced, 121..) => (960, 540),
             (Self::Balanced, 81..) => (1024, 576),
+            (Self::Fast, 181..) => (640, 360),
+            (Self::Fast, 121..) => (768, 432),
             _ => base,
         }
     }
@@ -268,14 +298,6 @@ impl StreamProfile {
         }
     }
 
-    fn target_bitrate(self) -> &'static str {
-        match self {
-            Self::Fast => "2600k",
-            Self::Balanced => "5200k",
-            Self::Sharp => "12000k",
-        }
-    }
-
     fn target_deadline(self) -> &'static str {
         match self {
             Self::Fast => "realtime",
@@ -291,6 +313,44 @@ impl StreamProfile {
             Self::Sharp => "6",
         }
     }
+}
+
+fn bitrate_string(bits_per_second: u64) -> String {
+    format!("{}k", (bits_per_second / 1000).max(1))
+}
+
+fn scaled_bitrate_for_dimensions(
+    baseline_bits_per_second: u64,
+    width: u32,
+    height: u32,
+    baseline_dimensions: (u32, u32),
+) -> String {
+    let baseline_pixels =
+        u64::from(baseline_dimensions.0).saturating_mul(u64::from(baseline_dimensions.1)).max(1);
+    let actual_pixels = u64::from(width).saturating_mul(u64::from(height)).max(1);
+    let scaled = baseline_bits_per_second
+        .saturating_mul(actual_pixels)
+        .saturating_div(baseline_pixels)
+        .max(900_000);
+    bitrate_string(scaled)
+}
+
+fn h264_bitrate_for_profile(profile: StreamProfile, width: u32, height: u32) -> String {
+    let baseline = match profile {
+        StreamProfile::Fast => H264_BITRATE.saturating_mul(55).saturating_div(100),
+        StreamProfile::Balanced => H264_BITRATE,
+        StreamProfile::Sharp => H264_BITRATE.saturating_mul(12).saturating_div(10),
+    };
+    scaled_bitrate_for_dimensions(baseline, width, height, profile.max_dimensions())
+}
+
+fn vp8_bitrate_for_profile(profile: StreamProfile, width: u32, height: u32) -> String {
+    let baseline = match profile {
+        StreamProfile::Fast => VP8_BITRATE.saturating_mul(80).saturating_div(100),
+        StreamProfile::Balanced => VP8_BITRATE,
+        StreamProfile::Sharp => VP8_BITRATE.saturating_mul(150).saturating_div(100),
+    };
+    scaled_bitrate_for_dimensions(baseline, width, height, profile.max_dimensions())
 }
 
 struct Vp8EncoderSession {
@@ -338,6 +398,7 @@ impl H264EncoderSession {
         );
 
         let mut command = Command::new(ffmpeg);
+        let target_bitrate = h264_bitrate_for_profile(profile, width, height);
         command
             .arg("-loglevel").arg("error")
             .arg("-f").arg("rawvideo")
@@ -354,9 +415,9 @@ impl H264EncoderSession {
                     .arg("-preset").arg("p1")
                     .arg("-tune").arg("ll")
                     .arg("-rc").arg("cbr")
-                    .arg("-b:v").arg(profile.target_bitrate())
-                    .arg("-maxrate").arg(profile.target_bitrate())
-                    .arg("-bufsize").arg(profile.target_bitrate())
+                    .arg("-b:v").arg(&target_bitrate)
+                    .arg("-maxrate").arg(&target_bitrate)
+                    .arg("-bufsize").arg(&target_bitrate)
                     .arg("-bf").arg("0")
                     .arg("-g").arg(profile.target_fps().to_string());
             }
@@ -371,14 +432,14 @@ impl H264EncoderSession {
                 command
                     .arg("-usage").arg("ultralowlatency")
                     .arg("-rc").arg("cbr")
-                    .arg("-b:v").arg(profile.target_bitrate())
-                    .arg("-maxrate").arg(profile.target_bitrate())
+                    .arg("-b:v").arg(&target_bitrate)
+                    .arg("-maxrate").arg(&target_bitrate)
                     .arg("-bf").arg("0")
                     .arg("-g").arg(profile.target_fps().to_string());
             }
             HardwareEncoder::VideoToolbox => {
                 command
-                    .arg("-b:v").arg(profile.target_bitrate())
+                    .arg("-b:v").arg(&target_bitrate)
                     .arg("-realtime").arg("true")
                     .arg("-bf").arg("0")
                     .arg("-g").arg(profile.target_fps().to_string());
@@ -392,8 +453,8 @@ impl H264EncoderSession {
                     .arg("-bf").arg("0")
                     .arg("-refs").arg("1")
                     .arg("-crf").arg(profile.target_crf())
-                    .arg("-maxrate").arg(profile.target_bitrate())
-                    .arg("-bufsize").arg(profile.target_bitrate())
+                    .arg("-maxrate").arg(&target_bitrate)
+                    .arg("-bufsize").arg(&target_bitrate)
                     .arg("-g").arg(profile.target_fps().to_string())
                     .arg("-keyint_min").arg(profile.target_fps().to_string())
                     .arg("-x264-params")
@@ -501,6 +562,7 @@ impl Vp8EncoderSession {
         );
 
         let mut command = Command::new(ffmpeg);
+        let target_bitrate = vp8_bitrate_for_profile(profile, width, height);
         command
             .arg("-loglevel")
             .arg("error")
@@ -511,7 +573,7 @@ impl Vp8EncoderSession {
             .arg("-s")
             .arg(format!("{width}x{height}"))
             .arg("-r")
-            .arg(profile.target_fps().to_string())
+            .arg(VP8_FPS.to_string())
             .arg("-i")
             .arg("pipe:0")
             .arg("-an")
@@ -527,14 +589,18 @@ impl Vp8EncoderSession {
             .arg("1")
             .arg("-auto-alt-ref")
             .arg("0")
+            .arg("-row-mt")
+            .arg("1")
+            .arg("-tile-columns")
+            .arg("1")
             .arg("-g")
-            .arg(profile.target_fps().to_string())
+            .arg(VP8_KEYFRAME_INTERVAL.to_string())
             .arg("-keyint_min")
-            .arg(profile.target_fps().to_string())
+            .arg(VP8_KEYFRAME_INTERVAL.to_string())
             .arg("-crf")
             .arg(profile.target_crf())
             .arg("-b:v")
-            .arg(profile.target_bitrate())
+            .arg(&target_bitrate)
             .arg("-threads")
             .arg("4")
             .arg("-f")
@@ -677,7 +743,8 @@ pub fn spawn_stream(
             let mut capture_engine = CaptureEngine::new();
             let mut dropped_stale_frames = 0u64;
             let mut last_backend_hint: Option<&'static str> = None;
-            let mut last_capture_ms: Option<u128> = None;
+            let mut capture_telemetry = CaptureTelemetry::default();
+            let mut smoothed_capture_ms: Option<u128> = None;
             let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32), Option<&'static str>)> = None;
 
             while !stop_capture.load(Ordering::Relaxed) {
@@ -686,7 +753,7 @@ pub fn spawn_stream(
                     .map(|guard| *guard)
                     .unwrap_or(StreamProfile::Balanced);
                 let capture_dimensions = stream_profile
-                    .adaptive_capture_dimensions(last_backend_hint, last_capture_ms);
+                    .adaptive_capture_dimensions(last_backend_hint, smoothed_capture_ms);
                 if last_logged_dimensions
                     != Some((stream_profile, capture_dimensions, last_backend_hint))
                 {
@@ -699,7 +766,7 @@ pub fn spawn_stream(
                                 capture_session_id,
                                 stream_profile.wire_name(),
                                 last_backend_hint.unwrap_or("unknown"),
-                                last_capture_ms
+                                smoothed_capture_ms
                                     .map(|value| value.to_string())
                                     .unwrap_or_else(|| "unknown".to_owned()),
                                 capture_dimensions.0,
@@ -714,7 +781,7 @@ pub fn spawn_stream(
                 let captured = capture_engine.capture(capture_dimensions, frame_index);
                 let capture_ms = capture_started.elapsed().as_millis();
                 last_backend_hint = Some(captured.backend);
-                last_capture_ms = Some(capture_ms);
+                smoothed_capture_ms = Some(capture_telemetry.push(capture_ms));
 
                 if captured.used_fallback && frame_index % 60 == 1 {
                     logging::append_log(
@@ -765,7 +832,7 @@ pub fn spawn_stream(
                             captured.backend,
                             stream_profile.wire_name(),
                             frame_index.saturating_add(1),
-                            capture_ms
+                            smoothed_capture_ms.unwrap_or(capture_ms)
                         ),
                     );
                 }

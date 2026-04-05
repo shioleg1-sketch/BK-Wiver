@@ -23,6 +23,14 @@ use crate::{
     signal::{self, SignalEvent},
 };
 
+struct PendingMediaFrame {
+    session_id: String,
+    codec: MediaCodec,
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
 const CONSOLE_AUTO_SIGN_IN_RETRY_MS: u64 = 10_000;
 const DEFAULT_OPERATOR_LOGIN: &str = "operator";
 const DEFAULT_OPERATOR_PASSWORD: &str = "bk-wiver-auto";
@@ -972,6 +980,8 @@ impl ConsoleApp {
     }
 
     fn process_media_events(&mut self, ctx: &Context) {
+        let mut pending_frame: Option<PendingMediaFrame> = None;
+
         while let Ok(event) = self.media_rx.try_recv() {
             match event {
                 MediaEvent::Connected { session_id } => {
@@ -1020,71 +1030,59 @@ impl ConsoleApp {
                         continue;
                     }
 
-                    self.media_codec = Some(codec);
-                    self.media_frame_count = self.media_frame_count.saturating_add(1);
-                    self.media_last_frame_at_ms = now_ms();
-                    self.media_changed_frame_count =
-                        self.media_changed_frame_count.saturating_add(1);
-                    if self.media_changed_frame_count <= 5
-                        || self.media_changed_frame_count % 120 == 0
-                    {
-                        logging::append_log(
-                            "DEBUG",
-                            "media.frame",
-                            format!(
-                                "session_id={} codec={:?} bytes={} changed_frames={}",
-                                session_id,
-                                codec,
-                                bytes.len(),
-                                self.media_changed_frame_count
-                            ),
-                        );
-                    }
-                    match codec {
-                        MediaCodec::H264 => {
-                            let (Some(width), Some(height)) = (width, height) else {
-                                continue;
-                            };
-                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                [width as usize, height as usize],
-                                &bytes,
-                            );
-                            if let Some(texture) = &mut self.session_texture {
-                                texture.set(color_image, egui::TextureOptions::LINEAR);
-                            } else {
-                                self.session_texture = Some(ctx.load_texture(
-                                    "remote-session-frame",
-                                    color_image,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                            self.media_connected_session_id = Some(session_id);
-                            ctx.request_repaint();
-                        }
-                        MediaCodec::Vp8 => {
-                            let (Some(width), Some(height)) = (width, height) else {
-                                continue;
-                            };
-                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                [width as usize, height as usize],
-                                &bytes,
-                            );
-                            if let Some(texture) = &mut self.session_texture {
-                                texture.set(color_image, egui::TextureOptions::LINEAR);
-                            } else {
-                                self.session_texture = Some(ctx.load_texture(
-                                    "remote-session-frame",
-                                    color_image,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                            self.media_connected_session_id = Some(session_id);
-                            ctx.request_repaint();
-                        }
-                    }
+                    let (Some(width), Some(height)) = (width, height) else {
+                        continue;
+                    };
+                    pending_frame = Some(PendingMediaFrame {
+                        session_id,
+                        codec,
+                        bytes,
+                        width,
+                        height,
+                    });
                 }
             }
         }
+
+        if let Some(frame) = pending_frame {
+            self.apply_media_frame(ctx, frame);
+        }
+    }
+
+    fn apply_media_frame(&mut self, ctx: &Context, frame: PendingMediaFrame) {
+        self.media_codec = Some(frame.codec);
+        self.media_frame_count = self.media_frame_count.saturating_add(1);
+        self.media_last_frame_at_ms = now_ms();
+        self.media_changed_frame_count = self.media_changed_frame_count.saturating_add(1);
+        if self.media_changed_frame_count <= 5 || self.media_changed_frame_count % 120 == 0 {
+            logging::append_log(
+                "DEBUG",
+                "media.frame",
+                format!(
+                    "session_id={} codec={:?} bytes={} changed_frames={}",
+                    frame.session_id,
+                    frame.codec,
+                    frame.bytes.len(),
+                    self.media_changed_frame_count
+                ),
+            );
+        }
+
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [frame.width as usize, frame.height as usize],
+            &frame.bytes,
+        );
+        if let Some(texture) = &mut self.session_texture {
+            texture.set(color_image, egui::TextureOptions::LINEAR);
+        } else {
+            self.session_texture = Some(ctx.load_texture(
+                "remote-session-frame",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.media_connected_session_id = Some(frame.session_id);
+        ctx.request_repaint();
     }
 
     fn session_status_label(session_state: &str) -> &'static str {
