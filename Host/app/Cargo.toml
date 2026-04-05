@@ -21,17 +21,15 @@ url = "2"
 webp = "0.7"
 h264-raw = "0.1"
 webp-codec = "0.3.1"
-# Производительность и мониторинг
-crossbeam-channel = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 dxgi-capture-rs = { path = "../third_party/dxgi-capture-rs" }
 windows-service = "0.7"
 windows-sys = { version = "0.59", features = [
-  "Win32_Foundation",
-  "Win32_Graphics_Gdi",
-  "Win32_System_RemoteDesktop",
-  "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(windows)'.build-dependencies]
