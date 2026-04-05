@@ -14,10 +14,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "in-process-encoding")]
 use ffmpeg_next as ffmpeg;
+#[cfg(feature = "in-process-encoding")]
 use ffmpeg_next::codec::{encoder, Id};
+#[cfg(feature = "in-process-encoding")]
 use ffmpeg_next::codec::Context;
+#[cfg(feature = "in-process-encoding")]
 use ffmpeg_next::format::Pixel;
+#[cfg(feature = "in-process-encoding")]
 use ffmpeg_next::Dictionary;
 
 use serde_json::json;
@@ -28,11 +33,16 @@ use crossbeam_channel::{Receiver as CrossbeamReceiver, bounded, TrySendError};
 
 use crate::{capture::CaptureEngine, logging};
 
+// Improvement 6: precise frame timing
+use spin_sleep::sleep;
+// Improvement 3: screen change detection
+use twox_hash::XxHash64;
+use std::hash::Hasher;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
-const MEDIA_PACKET_VERSION: u8 = 1;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const IVF_HEADER_LEN: usize = 32;
@@ -165,6 +175,7 @@ struct RawFrame {
     backend: &'static str,
     capture_ms: u128,
     captured_at: Instant,
+    is_i_frame: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -203,6 +214,16 @@ impl CaptureTelemetry {
 
         self.samples_ms.iter().copied().sum::<u128>() / self.samples_ms.len() as u128
     }
+}
+
+/// Improvement 3: Compute a fast perceptual hash of a frame for change detection.
+fn compute_frame_hash(data: &[u8]) -> u64 {
+    let step = data.len().max(1) / 4096;
+    let mut hasher = XxHash64::with_seed(0);
+    for i in (0..data.len()).step_by(step.max(1)) {
+        hasher.write_u8(data[i]);
+    }
+    hasher.finish()
 }
 
 fn app_state_dir() -> PathBuf {
@@ -804,7 +825,7 @@ pub fn spawn_stream(
         let (frame_tx, frame_rx): (
             crossbeam_channel::Sender<RawFrame>,
             CrossbeamReceiver<RawFrame>,
-        ) = bounded(2);
+        ) = bounded(4);
         let frame_drop_rx = frame_rx.clone();
         let stop_capture = stop_flag.clone();
         let capture_profile = profile.clone();
@@ -819,6 +840,8 @@ pub fn spawn_stream(
             let mut capture_telemetry = CaptureTelemetry::default();
             let mut smoothed_capture_ms: Option<u128> = None;
             let mut last_logged_dimensions: Option<(StreamProfile, (u32, u32), Option<&'static str>)> = None;
+            // Improvement 3: screen change detection
+            let mut prev_frame_hash: Option<u64> = None;
 
             while !stop_capture.load(Ordering::Relaxed) {
                 let stream_profile = capture_profile
@@ -875,6 +898,21 @@ pub fn spawn_stream(
                     height: frame_image.height(),
                     message: capture_message,
                 });
+
+                // Improvement 3: skip unchanged frames (but force I-frame every 30)
+                let current_hash = compute_frame_hash(frame_image.as_raw());
+                let is_key = frame_index % 30 == 0;
+                if prev_frame_hash == Some(current_hash) && !is_key {
+                    prev_frame_hash = Some(current_hash);
+                    frame_index = frame_index.wrapping_add(1);
+                    let elapsed = capture_started.elapsed();
+                    if let Some(remaining) = stream_profile.target_frame_interval().checked_sub(elapsed) {
+                        sleep(remaining);
+                    }
+                    continue;
+                }
+                prev_frame_hash = Some(current_hash);
+
                 let frame = RawFrame {
                     width: frame_image.width(),
                     height: frame_image.height(),
@@ -882,24 +920,27 @@ pub fn spawn_stream(
                     backend: captured.backend,
                     capture_ms,
                     captured_at: Instant::now(),
+                    is_i_frame: is_key,
                 };
 
                 match frame_tx.try_send(frame) {
                     Ok(()) => {}
                     Err(TrySendError::Full(frame)) => {
-                        let _ = frame_drop_rx.try_recv();
-                        if frame_tx.try_send(frame).is_ok() {
-                            dropped_stale_frames = dropped_stale_frames.saturating_add(1);
-                            if dropped_stale_frames == 1 || dropped_stale_frames % 120 == 0 {
-                                logging::append_log(
-                                    "INFO",
-                                    "media.capture",
-                                    format!(
-                                        "dropped_stale_frames={} strategy=latest_frame_wins",
-                                        dropped_stale_frames
-                                    ),
-                                );
-                            }
+                        // Improvement 5: prioritize I-frames, drop stale frames
+                        if frame.is_i_frame {
+                            while frame_drop_rx.try_recv().is_ok() {}
+                            if frame_tx.try_send(frame).is_err() {}
+                        }
+                        dropped_stale_frames = dropped_stale_frames.saturating_add(1);
+                        if dropped_stale_frames == 1 || dropped_stale_frames % 120 == 0 {
+                            logging::append_log(
+                                "INFO",
+                                "media.capture",
+                                format!(
+                                    "dropped_stale_frames={} strategy=i_frame_priority",
+                                    dropped_stale_frames
+                                ),
+                            );
                         }
                     }
                     Err(TrySendError::Disconnected(_)) => break,
@@ -925,7 +966,7 @@ pub fn spawn_stream(
                 let elapsed = capture_started.elapsed();
                 if let Some(remaining) = stream_profile.target_frame_interval().checked_sub(elapsed)
                 {
-                    thread::sleep(remaining);
+                    sleep(remaining);
                 }
             }
         });
@@ -945,6 +986,7 @@ pub fn spawn_stream(
                         let mut active_codec: Option<StreamCodec> = None;
                         let mut auto_codec_override: Option<StreamCodec> = None;
                         let mut auto_retry_h264_after: Option<Instant> = None;
+                        let stream_start = Instant::now();
 
                         logging::append_log(
                             "INFO",
@@ -961,6 +1003,12 @@ pub fn spawn_stream(
                                 Ok(f) => f,
                                 Err(_) => continue,
                             };
+
+                            // Compute PTS in microseconds since stream start
+                            let pts_us = frame.captured_at
+                                .duration_since(stream_start)
+                                .as_micros() as i64;
+                            let is_i_frame = frame.is_i_frame;
 
                             let stream_profile = profile
                                 .lock()
@@ -1087,6 +1135,8 @@ pub fn spawn_stream(
                                                         StreamCodec::H264,
                                                         MediaPacketKind::Config,
                                                         &payload,
+                                                        0,
+                                                        false,
                                                     );
                                                     if socket
                                                         .send(Message::Binary(packet.into()))
@@ -1119,6 +1169,8 @@ pub fn spawn_stream(
                                                         StreamCodec::H264,
                                                         MediaPacketKind::Frame,
                                                         &payload,
+                                                        pts_us,
+                                                        is_i_frame,
                                                     );
                                                     if socket
                                                         .send(Message::Binary(packet.into()))
@@ -1239,6 +1291,8 @@ pub fn spawn_stream(
                                                                 StreamCodec::Vp8,
                                                                 MediaPacketKind::Config,
                                                                 &header,
+                                                                0,
+                                                                false,
                                                             );
                                                             if socket
                                                                 .send(Message::Binary(
@@ -1270,6 +1324,8 @@ pub fn spawn_stream(
                                                                     &mut socket,
                                                                     &remainder,
                                                                     &mut vp8_chunks_sent,
+                                                                    0,
+                                                                    false,
                                                                 )
                                                                 .is_err()
                                                                 {
@@ -1289,6 +1345,8 @@ pub fn spawn_stream(
                                                             &mut socket,
                                                             &chunk,
                                                             &mut vp8_chunks_sent,
+                                                            pts_us,
+                                                            is_i_frame,
                                                         )
                                                         .is_err()
                                                         {
@@ -1490,13 +1548,22 @@ fn ensure_vp8_encoder(
     }
 }
 
-fn encode_media_packet(codec: StreamCodec, kind: MediaPacketKind, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + payload.len());
+fn encode_media_packet(
+    codec: StreamCodec,
+    kind: MediaPacketKind,
+    payload: &[u8],
+    pts_us: i64,
+    is_i_frame: bool,
+) -> Vec<u8> {
+    const MEDIA_PACKET_VERSION: u8 = 2;
+    let flags: u8 = if is_i_frame { 1 } else { 0 };
+    let mut bytes = Vec::with_capacity(16 + payload.len());
     bytes.extend_from_slice(MEDIA_PACKET_MAGIC);
     bytes.push(MEDIA_PACKET_VERSION);
     bytes.push(codec.code());
     bytes.push(kind.code());
-    bytes.push(0);
+    bytes.push(flags);
+    bytes.extend_from_slice(&pts_us.to_le_bytes());
     bytes.extend_from_slice(payload);
     bytes
 }
@@ -1507,6 +1574,8 @@ fn send_vp8_frame_chunks(
     >,
     frame_packet: &[u8],
     chunk_counter: &mut u64,
+    pts_us: i64,
+    is_i_frame: bool,
 ) -> Result<(), ()> {
     let total_len = u32::try_from(frame_packet.len()).map_err(|_| ())?;
     let mut offset = 0_usize;
@@ -1523,7 +1592,13 @@ fn send_vp8_frame_chunks(
         payload.extend_from_slice(&(chunk_len as u32).to_le_bytes());
         payload.extend_from_slice(&frame_packet[offset..end]);
 
-        let frame_packet = encode_media_packet(StreamCodec::Vp8, MediaPacketKind::Frame, &payload);
+        let frame_packet = encode_media_packet(
+            StreamCodec::Vp8,
+            MediaPacketKind::Frame,
+            &payload,
+            pts_us,
+            is_i_frame,
+        );
         socket
             .send(Message::Binary(frame_packet.into()))
             .map_err(|_| ())?;
@@ -1548,6 +1623,7 @@ fn send_vp8_frame_chunks(
 // drain_packets()/take_packets().
 // ============================================================================
 
+#[cfg(feature = "in-process-encoding")]
 /// In-process H.264 encoder using ffmpeg-next (no subprocess overhead).
 ///
 /// This encoder accepts raw BGRA frames via `push_frame()`, converts them to
@@ -1565,6 +1641,7 @@ pub struct InProcessH264Encoder {
     frame_count: i64,
 }
 
+#[cfg(feature = "in-process-encoding")]
 #[allow(dead_code)]
 impl InProcessH264Encoder {
     /// Create a new in-process H.264 encoder.
@@ -1733,6 +1810,7 @@ impl InProcessH264Encoder {
     }
 }
 
+#[cfg(feature = "in-process-encoding")]
 impl Drop for InProcessH264Encoder {
     fn drop(&mut self) {
         let _ = self.encoder.send_eof();
