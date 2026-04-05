@@ -53,7 +53,9 @@ pub enum SignalEvent {
 
 const SIGNAL_POLL_TIMEOUT: Duration = Duration::from_millis(16);
 const SIGNAL_PING_INTERVAL: Duration = Duration::from_secs(10);
-const SIGNAL_RECONNECT_DELAYS_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
+// Fix: exponential backoff с jitter — было [1s, 2s, 5s, 10s], стало до 30s
+const SIGNAL_RECONNECT_DELAYS_MS: [u64; 8] = [2_000, 4_000, 8_000, 12_000, 16_000, 20_000, 25_000, 30_000];
+const SIGNAL_MIN_RECONNECT_INTERVAL: Duration = Duration::from_secs(2); // Не чаще чем раз в 2s
 
 static SIGNAL_OUTBOUND: OnceLock<Mutex<HashMap<String, Sender<Value>>>> = OnceLock::new();
 
@@ -71,6 +73,7 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
     thread::spawn(move || {
         let mut was_connected = false;
         let mut reconnect_attempt = 0usize;
+        let mut last_reconnect_at = Instant::now(); // Fix: track last reconnect time
         let Ok(url) = signal_url(&server_url, &token) else {
             let _ = event_tx.send(SignalEvent::Disconnected {
                 reason: "invalid websocket url".to_owned(),
@@ -161,11 +164,26 @@ pub fn spawn_listener(server_url: String, token: String, event_tx: Sender<Signal
                 }
             }
 
-            let delay_ms = SIGNAL_RECONNECT_DELAYS_MS
+            // Fix: exponential backoff + jitter + min interval enforcement
+            let base_delay_ms = SIGNAL_RECONNECT_DELAYS_MS
                 .get(reconnect_attempt)
                 .copied()
-                .unwrap_or(*SIGNAL_RECONNECT_DELAYS_MS.last().unwrap_or(&10_000));
+                .unwrap_or(*SIGNAL_RECONNECT_DELAYS_MS.last().unwrap_or(&30_000));
+            
+            // Add deterministic jitter based on attempt number: ±10%
+            let jitter_range = base_delay_ms / 10;
+            let jitter = ((reconnect_attempt as u64 * 1357) % (jitter_range * 2 + 1));
+            let delay_ms = base_delay_ms.saturating_sub(jitter_range).saturating_add(jitter).max(1_000);
+            
+            // Enforce minimum interval between reconnects
+            let elapsed_since_last = last_reconnect_at.elapsed();
+            if elapsed_since_last < SIGNAL_MIN_RECONNECT_INTERVAL {
+                let remaining = SIGNAL_MIN_RECONNECT_INTERVAL - elapsed_since_last;
+                thread::sleep(remaining);
+            }
+            
             reconnect_attempt = reconnect_attempt.saturating_add(1);
+            last_reconnect_at = Instant::now();
             thread::sleep(Duration::from_millis(delay_ms));
         }
     });
