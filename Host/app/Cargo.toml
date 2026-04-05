@@ -17,6 +17,14 @@ serde_json = "1.0"
 tray-icon = "0.19"
 tungstenite = "0.24"
 url = "2"
+# Оптимизация видео и кодеков
+webp = "0.7"
+h264-raw = "0.1"
+webp-codec = "0.3.1"
+# Производительность и мониторинг
+crossbeam-epoch = "0.9"
+frame-buffer = "0.9"
+frame-rate = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 dxgi-capture-rs = { path = "../third_party/dxgi-capture-rs" }

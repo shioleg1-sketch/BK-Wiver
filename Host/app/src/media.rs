@@ -23,15 +23,12 @@ use crate::{capture::CaptureEngine, logging};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
-const MEDIA_PACKET_VERSION: u8 = 1;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const IVF_HEADER_LEN: usize = 32;
-const IVF_FRAME_HEADER_LEN: usize = 12;
-const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
-const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
-const VP8_FRAME_CHUNK_DATA_LEN: usize = 4096;
+// Оптимизированные настройки кодеков
+const H264_CRF: u8 = 25;        // Качество (20-30)
+const H264_BITRATE: u64 = 5000000;  // 5 Mbps для 1080p
+const VP8_BITRATE: u64 = 3000000;   // 3 Mbps для VP8
+const VP8_FPS: u32 = 30;             // Целевой FPS
+const VP8_KEYFRAME_INTERVAL: u32 = 50;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamCodec {
