@@ -18,7 +18,7 @@ tray-icon = "0.19"
 tungstenite = "0.24"
 url = "2"
 # Оптимизация видео и кодеков
-webp = "0.7"
+webp = "0.3.1"
 webp-codec = "0.3.1"
 
 [target.'cfg(windows)'.dependencies]
