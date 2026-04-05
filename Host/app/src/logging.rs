@@ -44,6 +44,7 @@ pub fn export_diagnostic_report() -> Result<PathBuf, String> {
         "device-registration.json",
         "service-status.json",
         "agent-status.json",
+        "capture-status.json",
     ] {
         let path = app_state_dir().join(name);
         body.push_str(&format!("--- {} ---\n", name));

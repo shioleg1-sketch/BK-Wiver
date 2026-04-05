@@ -103,6 +103,18 @@ struct AgentRuntimeStatus {
     signal_status: String,
 }
 
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct CaptureRuntimeStatus {
+    state: String,
+    backend: String,
+    profile: String,
+    #[serde(rename = "updatedAtMs")]
+    updated_at_ms: u64,
+    width: u32,
+    height: u32,
+    message: String,
+}
+
 struct HostMediaSession {
     stop_flag: Arc<AtomicBool>,
     profile: Arc<Mutex<media::StreamProfile>>,
@@ -278,6 +290,7 @@ struct HostApp {
     registration: DeviceRegistration,
     service_status: Option<ServiceRuntimeStatus>,
     agent_status: Option<AgentRuntimeStatus>,
+    capture_status: Option<CaptureRuntimeStatus>,
     status_line: String,
     show_id_window: bool,
     main_window_visible: bool,
@@ -312,6 +325,7 @@ impl HostApp {
             registration: DeviceRegistration::default(),
             service_status: None,
             agent_status: None,
+            capture_status: None,
             status_line: String::new(),
             show_id_window: false,
             main_window_visible: false,
@@ -353,6 +367,7 @@ impl HostApp {
             load_json::<DeviceRegistration>("device-registration.json").unwrap_or_default();
         self.service_status = load_json::<ServiceRuntimeStatus>("service-status.json");
         self.agent_status = load_json::<AgentRuntimeStatus>("agent-status.json");
+        self.capture_status = load_json::<CaptureRuntimeStatus>("capture-status.json");
         let registration_server_url = normalize_server_url(&self.registration.server_url);
         if self.server_url_input.trim().is_empty()
             && !registration_server_url.is_empty()
@@ -1571,6 +1586,21 @@ impl App for HostApp {
                                 } else {
                                     ui.label(
                                         RichText::new(self.tr("Статус агента ещё не опубликован.", "Agent status is not published yet."))
+                                            .size(13.0)
+                                            .color(Color32::from_rgb(120, 130, 148)),
+                                    );
+                                }
+                                ui.add_space(8.0);
+                                if let Some(capture) = &self.capture_status {
+                                    host_detail_row(ui, self.tr("Состояние захвата", "Capture state"), value_or_placeholder(&capture.state, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Backend захвата", "Capture backend"), value_or_placeholder(&capture.backend, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Профиль захвата", "Capture profile"), value_or_placeholder(&capture.profile, self.tr("нет", "none")));
+                                    host_detail_row(ui, self.tr("Размер захвата", "Capture size"), &format!("{}x{}", capture.width, capture.height));
+                                    host_detail_row(ui, self.tr("Обновление захвата", "Capture updated"), &format_ms(capture.updated_at_ms, self.tr("никогда", "never")));
+                                    host_detail_row(ui, self.tr("Сообщение захвата", "Capture msg"), value_or_placeholder(&capture.message, self.tr("нет", "none")));
+                                } else {
+                                    ui.label(
+                                        RichText::new(self.tr("Статус захвата ещё не опубликован.", "Capture status is not published yet."))
                                             .size(13.0)
                                             .color(Color32::from_rgb(120, 130, 148)),
                                     );

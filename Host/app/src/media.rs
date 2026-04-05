@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     env,
+    fs,
     io::{Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
@@ -160,6 +161,18 @@ struct RawFrame {
     captured_at: Instant,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureRuntimeStatus {
+    state: String,
+    backend: String,
+    profile: String,
+    updated_at_ms: u64,
+    width: u32,
+    height: u32,
+    message: String,
+}
+
 #[derive(Default)]
 struct CaptureTelemetry {
     samples_ms: VecDeque<u128>,
@@ -184,6 +197,45 @@ impl CaptureTelemetry {
 
         self.samples_ms.iter().copied().sum::<u128>() / self.samples_ms.len() as u128
     }
+}
+
+fn app_state_dir() -> PathBuf {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    local_app_data.join("BK-Wiver").join("state")
+}
+
+fn save_capture_status(status: &CaptureRuntimeStatus) {
+    let state_dir = app_state_dir();
+    let _ = fs::create_dir_all(&state_dir);
+    let path = state_dir.join("capture-status.json");
+    if let Ok(body) = serde_json::to_string_pretty(status) {
+        let _ = fs::write(path, body);
+    }
+}
+
+fn capture_state_for_backend(backend: &str) -> (&'static str, String) {
+    if backend.contains("virtual-display-pending") {
+        (
+            "virtual_display_pending",
+            "Для быстрого захвата требуется виртуальный дисплей.".to_owned(),
+        )
+    } else if backend.contains("dxgi-unavailable") {
+        (
+            "capture_unavailable",
+            "DXGI недоступен для текущей сессии или адаптера.".to_owned(),
+        )
+    } else {
+        ("ready", "Захват работает.".to_owned())
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -792,6 +844,16 @@ pub fn spawn_stream(
                 }
 
                 let frame_image = captured.image;
+                let (capture_state, capture_message) = capture_state_for_backend(captured.backend);
+                save_capture_status(&CaptureRuntimeStatus {
+                    state: capture_state.to_owned(),
+                    backend: captured.backend.to_owned(),
+                    profile: stream_profile.wire_name().to_owned(),
+                    updated_at_ms: now_ms(),
+                    width: frame_image.width(),
+                    height: frame_image.height(),
+                    message: capture_message,
+                });
                 let frame = RawFrame {
                     width: frame_image.width(),
                     height: frame_image.height(),
