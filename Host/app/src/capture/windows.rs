@@ -20,9 +20,17 @@ enum WindowsCaptureStrategy {
     HeadlessNoDisplay,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureAvailabilityState {
+    Ready,
+    VirtualDisplayPending,
+    CaptureUnavailable,
+}
+
 pub struct WindowsCaptureEngine {
     strategy: WindowsCaptureStrategy,
     dxgi_backend: Option<DxgiCaptureBackend>,
+    availability_state: CaptureAvailabilityState,
     consecutive_slow_dxgi_frames: u32,
     next_retry_frame: u32,
     retry_interval_frames: u32,
@@ -45,15 +53,21 @@ impl WindowsCaptureEngine {
                 None
             }
         };
+        let availability_state = if dxgi_backend.is_some() {
+            CaptureAvailabilityState::Ready
+        } else {
+            unavailable_state_for(strategy)
+        };
 
         logging::append_log(
             "INFO",
             "capture.strategy",
             format!(
-                "strategy={} preferred_backend={} dxgi_available={}",
+                "strategy={} preferred_backend={} dxgi_available={} availability={}",
                 strategy_name(strategy),
                 backend_name_for(strategy),
                 dxgi_backend.is_some(),
+                availability_name_for(strategy, availability_state),
             ),
         );
 
@@ -68,6 +82,7 @@ impl WindowsCaptureEngine {
         Self {
             strategy,
             dxgi_backend,
+            availability_state,
             consecutive_slow_dxgi_frames: 0,
             next_retry_frame: 120,
             retry_interval_frames: 120,
@@ -91,6 +106,7 @@ impl WindowsCaptureEngine {
 
             match result {
                 Ok(image) => {
+                    self.availability_state = CaptureAvailabilityState::Ready;
                     self.handle_dxgi_capture_timing(capture_elapsed);
                     self.reset_retry_backoff(frame_index);
                     return self.capture_frame(image, backend_name_for(self.strategy), false, frame_index);
@@ -105,6 +121,7 @@ impl WindowsCaptureEngine {
 
                     if should_retry_dxgi(&error) {
                         self.dxgi_backend = None;
+                        self.availability_state = unavailable_state_for(self.strategy);
                         self.bump_retry_backoff(frame_index);
                     }
 
@@ -178,9 +195,11 @@ impl WindowsCaptureEngine {
                 "capture",
                 format!("retrying backend {}", backend_name_for(self.strategy)),
             );
+            self.availability_state = CaptureAvailabilityState::Ready;
             self.reset_retry_backoff(frame_index);
             true
         } else {
+            self.availability_state = unavailable_state_for(self.strategy);
             self.bump_retry_backoff(frame_index);
             false
         }
@@ -449,9 +468,44 @@ fn backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
 }
 
 fn unavailable_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
+    availability_name_for(strategy, unavailable_state_for(strategy))
+}
+
+fn unavailable_state_for(strategy: WindowsCaptureStrategy) -> CaptureAvailabilityState {
     match strategy {
-        WindowsCaptureStrategy::LocalDisplay => "windows-dxgi-unavailable",
-        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-dxgi-unavailable",
-        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-dxgi-unavailable",
+        WindowsCaptureStrategy::HeadlessNoDisplay => CaptureAvailabilityState::VirtualDisplayPending,
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => CaptureAvailabilityState::CaptureUnavailable,
+        WindowsCaptureStrategy::LocalDisplay => CaptureAvailabilityState::CaptureUnavailable,
+    }
+}
+
+fn availability_name_for(
+    strategy: WindowsCaptureStrategy,
+    state: CaptureAvailabilityState,
+) -> &'static str {
+    match (strategy, state) {
+        (_, CaptureAvailabilityState::Ready) => backend_name_for(strategy),
+        (WindowsCaptureStrategy::LocalDisplay, CaptureAvailabilityState::VirtualDisplayPending) => {
+            "windows-virtual-display-pending"
+        }
+        (
+            WindowsCaptureStrategy::RemoteDesktopWithDisplay,
+            CaptureAvailabilityState::VirtualDisplayPending,
+        ) => "windows-rdp-virtual-display-pending",
+        (
+            WindowsCaptureStrategy::HeadlessNoDisplay,
+            CaptureAvailabilityState::VirtualDisplayPending,
+        ) => "windows-headless-virtual-display-pending",
+        (WindowsCaptureStrategy::LocalDisplay, CaptureAvailabilityState::CaptureUnavailable) => {
+            "windows-dxgi-unavailable"
+        }
+        (
+            WindowsCaptureStrategy::RemoteDesktopWithDisplay,
+            CaptureAvailabilityState::CaptureUnavailable,
+        ) => "windows-rdp-dxgi-unavailable",
+        (
+            WindowsCaptureStrategy::HeadlessNoDisplay,
+            CaptureAvailabilityState::CaptureUnavailable,
+        ) => "windows-headless-dxgi-unavailable",
     }
 }
