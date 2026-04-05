@@ -447,7 +447,6 @@ struct WgcCaptureBackend {
 
 impl WgcCaptureBackend {
     fn new() -> Result<Self, String> {
-        let _ = windows::core::initialize_mta().map_err(|error| error.to_string())?;
         if !GraphicsCaptureSession::IsSupported().map_err(|error| error.to_string())? {
             return Err("Windows Graphics Capture is not supported".to_owned());
         }
@@ -543,17 +542,23 @@ impl WgcCaptureBackend {
         let source_texture: ID3D11Texture2D =
             unsafe { access.GetInterface() }.map_err(|error| error.to_string())?;
 
-        let staging_texture =
-            self.ensure_staging_texture(&source_texture, content_size.Width as u32, content_size.Height as u32)?;
+        let staging_texture = self
+            .ensure_staging_texture(
+                &source_texture,
+                content_size.Width as u32,
+                content_size.Height as u32,
+            )?
+            .clone();
+        let d3d_context = self.d3d_context.clone();
 
         unsafe {
-            self.d3d_context.CopyResource(staging_texture, &source_texture);
+            d3d_context.CopyResource(&staging_texture, &source_texture);
         }
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
-            self.d3d_context
-                .Map(staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            d3d_context
+                .Map(&staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(|error| error.to_string())?;
         }
 
@@ -569,7 +574,7 @@ impl WgcCaptureBackend {
         }
 
         unsafe {
-            self.d3d_context.Unmap(staging_texture, 0);
+            d3d_context.Unmap(&staging_texture, 0);
         }
 
         let image = if width as u32 == max_dimensions.0 && height as u32 == max_dimensions.1 {
