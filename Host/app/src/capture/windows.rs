@@ -2,30 +2,16 @@ use dxgi_capture_rs::{CaptureError, DXGIManager};
 use image::{ImageBuffer, RgbaImage};
 use screenshots::Screen;
 use std::time::Duration;
-use windows_sys::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-        GetDIBits, ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, COLORONCOLOR, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
-        SRCCOPY,
-    },
-    UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SM_REMOTESESSION},
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SM_REMOTESESSION,
 };
 
 use crate::logging;
 
 use super::{
-    common::{fit_frame, ScreenshotsCaptureBackend},
     CaptureFrame,
+    common::{build_test_frame, fit_frame},
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsCaptureBackendKind {
-    DxgiDuplication,
-    Win32Gdi,
-    ScreenshotsFallback,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowsCaptureStrategy {
@@ -36,13 +22,10 @@ enum WindowsCaptureStrategy {
 
 pub struct WindowsCaptureEngine {
     strategy: WindowsCaptureStrategy,
-    preferred_backend: WindowsCaptureBackendKind,
     dxgi_backend: Option<DxgiCaptureBackend>,
-    gdi_backend: Option<GdiCaptureBackend>,
     consecutive_slow_dxgi_frames: u32,
-    next_primary_retry_frame: u32,
-    primary_retry_interval_frames: u32,
-    screenshots_fallback: ScreenshotsCaptureBackend,
+    next_retry_frame: u32,
+    retry_interval_frames: u32,
     last_successful_frame: Option<RgbaImage>,
     last_successful_frame_index: u32,
 }
@@ -62,224 +45,89 @@ impl WindowsCaptureEngine {
             }
         };
 
-        let gdi_backend = match GdiCaptureBackend::new() {
-            Ok(backend) => Some(backend),
-            Err(error) => {
-                logging::append_log(
-                    "WARN",
-                    "capture.gdi",
-                    format!("initialization failed: {}", error),
-                );
-                None
-            }
-        };
-
-        let preferred_backend =
-            preferred_backend_for_strategy(strategy, dxgi_backend.is_some());
-        let screenshots_backend_name = screenshots_backend_name_for(strategy);
         logging::append_log(
             "INFO",
             "capture.strategy",
             format!(
-                "strategy={} preferred_backend={} dxgi_available={} gdi_available={} screenshots_backend={}",
+                "strategy={} preferred_backend={} dxgi_available={}",
                 strategy_name(strategy),
-                backend_name_for(strategy, preferred_backend),
+                backend_name_for(strategy),
                 dxgi_backend.is_some(),
-                gdi_backend.is_some(),
-                screenshots_backend_name,
             ),
         );
+
         if strategy == WindowsCaptureStrategy::HeadlessNoDisplay {
             logging::append_log(
                 "WARN",
                 "capture.strategy",
-                "headless session detected without an active display output; fast capture typically requires a virtual display or physical monitor",
+                "headless session detected without an active display output; DXGI capture requires a real or virtual display",
             );
         }
 
         Self {
             strategy,
-            preferred_backend,
             dxgi_backend,
-            gdi_backend,
             consecutive_slow_dxgi_frames: 0,
-            next_primary_retry_frame: 120,
-            primary_retry_interval_frames: 120,
-            screenshots_fallback: ScreenshotsCaptureBackend::with_backend_name(
-                screenshots_backend_name,
-            ),
+            next_retry_frame: 120,
+            retry_interval_frames: 120,
             last_successful_frame: None,
             last_successful_frame_index: 0,
         }
     }
 
     pub fn capture(&mut self, max_dimensions: (u32, u32), frame_index: u32) -> CaptureFrame {
-        if matches!(
-            self.preferred_backend,
-            WindowsCaptureBackendKind::ScreenshotsFallback | WindowsCaptureBackendKind::Win32Gdi
-        ) && frame_index >= self.next_primary_retry_frame
-        {
-            let restored = self.try_restore_primary_backends(frame_index);
-            if restored && self.preferred_backend != WindowsCaptureBackendKind::Win32Gdi {
-                return self.capture(max_dimensions, frame_index);
-            }
+        if self.dxgi_backend.is_none() && frame_index >= self.next_retry_frame {
+            self.try_restore_dxgi(frame_index);
         }
 
-        match self.preferred_backend {
-            WindowsCaptureBackendKind::DxgiDuplication => {
-                if self.dxgi_backend.is_some() {
-                    let (result, capture_elapsed) = {
-                        let backend = self.dxgi_backend.as_mut().expect("dxgi backend checked");
-                        let started = std::time::Instant::now();
-                        let result = backend.capture(max_dimensions, frame_index);
-                        (result, started.elapsed())
-                    };
+        if self.dxgi_backend.is_some() {
+            let (result, capture_elapsed) = {
+                let backend = self.dxgi_backend.as_mut().expect("dxgi backend checked");
+                let started = std::time::Instant::now();
+                let result = backend.capture(max_dimensions, frame_index);
+                (result, started.elapsed())
+            };
 
-                    match result {
-                        Ok(image) => {
-                            self.handle_dxgi_capture_timing(capture_elapsed);
-                            self.reset_primary_retry_backoff(frame_index);
-                            self.capture_frame(
-                                image,
-                                backend_name_for(
-                                    self.strategy,
-                                    WindowsCaptureBackendKind::DxgiDuplication,
-                                ),
-                                false,
-                                frame_index,
-                            )
-                        }
-                        Err(error) => {
-                            self.consecutive_slow_dxgi_frames = 0;
-                            logging::append_log(
-                                "WARN",
-                                "capture.dxgi",
-                                format!("frame capture failed: {}", error),
-                            );
-
-                            if should_retry_dxgi(&error) {
-                                match self.capture_with_gdi(max_dimensions) {
-                                    Ok(image) => self.capture_frame(
-                                        image,
-                                        backend_name_for(
-                                            self.strategy,
-                                            WindowsCaptureBackendKind::Win32Gdi,
-                                        ),
-                                        false,
-                                        frame_index,
-                                    ),
-                                    Err(gdi_error) => {
-                                        logging::append_log(
-                                            "WARN",
-                                            "capture.gdi",
-                                            format!(
-                                                "temporary fallback after dxgi failure also failed: {}",
-                                                gdi_error
-                                            ),
-                                        );
-                                        self.preferred_backend =
-                                            WindowsCaptureBackendKind::ScreenshotsFallback;
-                                        self.capture_with_screenshots(max_dimensions, frame_index)
-                                    }
-                                }
-                            } else {
-                                logging::append_log(
-                                    "WARN",
-                                    "capture.dxgi",
-                                    format!(
-                                        "switching preferred backend to {}",
-                                        backend_name_for(
-                                            self.strategy,
-                                            WindowsCaptureBackendKind::Win32Gdi
-                                        )
-                                    ),
-                                );
-                                self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
-                                self.capture(max_dimensions, frame_index)
-                            }
-                        }
-                    }
-                } else {
+            match result {
+                Ok(image) => {
+                    self.handle_dxgi_capture_timing(capture_elapsed);
+                    self.reset_retry_backoff(frame_index);
+                    return self.capture_frame(image, backend_name_for(self.strategy), false, frame_index);
+                }
+                Err(error) => {
+                    self.consecutive_slow_dxgi_frames = 0;
                     logging::append_log(
                         "WARN",
                         "capture.dxgi",
-                        format!(
-                            "backend unavailable, switching preferred backend to {}",
-                            backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi)
-                        ),
+                        format!("frame capture failed: {}", error),
                     );
-                    self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
-                    self.capture(max_dimensions, frame_index)
+
+                    if should_retry_dxgi(&error) {
+                        self.dxgi_backend = None;
+                        self.bump_retry_backoff(frame_index);
+                    }
+
+                    return self.unavailable_frame(frame_index);
                 }
             }
-            WindowsCaptureBackendKind::Win32Gdi => match self.capture_with_gdi(max_dimensions) {
-                Ok(image) => self.capture_frame(
-                    image,
-                    backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi),
-                    false,
-                    frame_index,
-                ),
-                Err(error) => {
-                    logging::append_log(
-                        "WARN",
-                        "capture.gdi",
-                        format!(
-                            "frame capture failed, switching preferred backend to screenshots fallback: {}",
-                            error
-                        ),
-                    );
-                    self.preferred_backend = WindowsCaptureBackendKind::ScreenshotsFallback;
-                    self.capture_with_screenshots(max_dimensions, frame_index)
-                }
-            },
-            WindowsCaptureBackendKind::ScreenshotsFallback => {
-                self.capture_with_screenshots(max_dimensions, frame_index)
-            }
-        }
-    }
-
-    fn capture_with_gdi(&mut self, max_dimensions: (u32, u32)) -> Result<RgbaImage, String> {
-        if let Some(backend) = &mut self.gdi_backend {
-            return backend.capture(max_dimensions, self.strategy);
         }
 
-        let mut backend = GdiCaptureBackend::new()?;
-        let result = backend.capture(max_dimensions, self.strategy);
-        self.gdi_backend = Some(backend);
-        result
+        self.unavailable_frame(frame_index)
     }
 
-    fn capture_with_screenshots(
-        &mut self,
-        max_dimensions: (u32, u32),
-        frame_index: u32,
-    ) -> CaptureFrame {
-        match self.screenshots_fallback.try_capture(max_dimensions) {
-            Ok(image) => self.capture_frame(
+    fn unavailable_frame(&mut self, frame_index: u32) -> CaptureFrame {
+        if let Some(image) = self.last_successful_frame.clone() {
+            return CaptureFrame {
                 image,
-                self.screenshots_fallback.backend_name(),
-                false,
-                frame_index,
-            ),
-            Err(error) => {
-                logging::append_log(
-                    "WARN",
-                    "capture.screenshots",
-                    format!("frame capture failed: {}", error),
-                );
-                if let Some(image) = self.last_successful_frame.clone() {
-                    return CaptureFrame {
-                        image,
-                        backend: "windows-last-frame",
-                        used_fallback: false,
-                    };
-                }
-                CaptureFrame {
-                    image: super::common::build_test_frame(frame_index),
-                    backend: "test-fallback",
-                    used_fallback: true,
-                }
-            }
+                backend: unavailable_backend_name_for(self.strategy),
+                used_fallback: true,
+            };
+        }
+
+        CaptureFrame {
+            image: build_test_frame(frame_index),
+            backend: unavailable_backend_name_for(self.strategy),
+            used_fallback: true,
         }
     }
 
@@ -296,6 +144,7 @@ impl WindowsCaptureEngine {
             self.last_successful_frame = Some(image.clone());
             self.last_successful_frame_index = frame_index;
         }
+
         CaptureFrame {
             image,
             backend,
@@ -303,82 +152,47 @@ impl WindowsCaptureEngine {
         }
     }
 
-    fn try_restore_primary_backends(&mut self, frame_index: u32) -> bool {
+    fn try_restore_dxgi(&mut self, frame_index: u32) -> bool {
         let preferred_source_index = self
             .dxgi_backend
             .as_ref()
             .map(DxgiCaptureBackend::source_index)
             .unwrap_or(0);
 
-        if self.dxgi_backend.is_none() {
-            self.dxgi_backend = match DxgiCaptureBackend::with_preferred_source_index(
-                preferred_source_index,
-            ) {
-                Ok(backend) => Some(backend),
-                Err(error) => {
-                    logging::append_log(
-                        "WARN",
-                        "capture.dxgi",
-                        format!("reinitialization failed: {}", error),
-                    );
-                    None
-                }
-            };
-        }
-
-        if self.gdi_backend.is_none() {
-            self.gdi_backend = match GdiCaptureBackend::new() {
-                Ok(backend) => Some(backend),
-                Err(error) => {
-                    logging::append_log(
-                        "WARN",
-                        "capture.gdi",
-                        format!("reinitialization failed: {}", error),
-                    );
-                    None
-                }
-            };
-        }
+        self.dxgi_backend = match DxgiCaptureBackend::with_preferred_source_index(preferred_source_index) {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                logging::append_log(
+                    "WARN",
+                    "capture.dxgi",
+                    format!("reinitialization failed: {}", error),
+                );
+                None
+            }
+        };
 
         if self.dxgi_backend.is_some() {
             logging::append_log(
                 "INFO",
                 "capture",
-                format!(
-                    "retrying primary backend {}",
-                    backend_name_for(self.strategy, WindowsCaptureBackendKind::DxgiDuplication)
-                ),
+                format!("retrying backend {}", backend_name_for(self.strategy)),
             );
-            self.preferred_backend = WindowsCaptureBackendKind::DxgiDuplication;
-            self.reset_primary_retry_backoff(frame_index);
+            self.reset_retry_backoff(frame_index);
             true
-        } else if self.gdi_backend.is_some() {
-            logging::append_log(
-                "INFO",
-                "capture",
-                format!(
-                    "retrying backend {}",
-                    backend_name_for(self.strategy, WindowsCaptureBackendKind::Win32Gdi)
-                ),
-            );
-            self.preferred_backend = WindowsCaptureBackendKind::Win32Gdi;
-            self.bump_primary_retry_backoff(frame_index);
-            false
         } else {
-            self.bump_primary_retry_backoff(frame_index);
+            self.bump_retry_backoff(frame_index);
             false
         }
     }
 
-    fn reset_primary_retry_backoff(&mut self, frame_index: u32) {
-        self.primary_retry_interval_frames = 120;
-        self.next_primary_retry_frame = frame_index.saturating_add(self.primary_retry_interval_frames);
+    fn reset_retry_backoff(&mut self, frame_index: u32) {
+        self.retry_interval_frames = 120;
+        self.next_retry_frame = frame_index.saturating_add(self.retry_interval_frames);
     }
 
-    fn bump_primary_retry_backoff(&mut self, frame_index: u32) {
-        self.primary_retry_interval_frames =
-            (self.primary_retry_interval_frames.saturating_mul(2)).clamp(120, 960);
-        self.next_primary_retry_frame = frame_index.saturating_add(self.primary_retry_interval_frames);
+    fn bump_retry_backoff(&mut self, frame_index: u32) {
+        self.retry_interval_frames = (self.retry_interval_frames.saturating_mul(2)).clamp(120, 960);
+        self.next_retry_frame = frame_index.saturating_add(self.retry_interval_frames);
     }
 
     fn handle_dxgi_capture_timing(&mut self, elapsed: Duration) {
@@ -421,7 +235,14 @@ impl WindowsCaptureEngine {
             "capture.dxgi",
             format!("reinitializing backend reason={}", reason),
         );
-        let replacement = match DxgiCaptureBackend::new() {
+
+        let preferred_source_index = self
+            .dxgi_backend
+            .as_ref()
+            .map(DxgiCaptureBackend::source_index)
+            .unwrap_or(0);
+
+        let replacement = match DxgiCaptureBackend::with_preferred_source_index(preferred_source_index) {
             Ok(backend) => Some(backend),
             Err(error) => {
                 logging::append_log(
@@ -432,6 +253,7 @@ impl WindowsCaptureEngine {
                 None
             }
         };
+
         if let Some(backend) = replacement {
             self.dxgi_backend = Some(backend);
         } else {
@@ -441,6 +263,7 @@ impl WindowsCaptureEngine {
                 "keeping existing dxgi backend after failed slow-frame reinitialization",
             );
         }
+
         self.consecutive_slow_dxgi_frames = 0;
     }
 }
@@ -524,182 +347,6 @@ impl DxgiCaptureBackend {
     }
 }
 
-struct GdiCaptureBackend {
-    screen_dc: HDC,
-    memory_dc: HDC,
-    bitmap: HBITMAP,
-    previous: HGDIOBJ,
-    source_width: i32,
-    source_height: i32,
-    capture_width: i32,
-    capture_height: i32,
-    bgra: Vec<u8>,
-}
-
-impl GdiCaptureBackend {
-    fn new() -> Result<Self, String> {
-        let (source_width, source_height) = current_screen_size()?;
-        Self::create(source_width, source_height, source_width, source_height)
-    }
-
-    fn capture(
-        &mut self,
-        max_dimensions: (u32, u32),
-        strategy: WindowsCaptureStrategy,
-    ) -> Result<RgbaImage, String> {
-        let (source_width, source_height) = current_screen_size()?;
-        let (capture_width, capture_height) =
-            desired_capture_size(source_width, source_height, max_dimensions, strategy);
-
-        if source_width != self.source_width
-            || source_height != self.source_height
-            || capture_width != self.capture_width
-            || capture_height != self.capture_height
-        {
-            let replacement =
-                Self::create(source_width, source_height, capture_width, capture_height)?;
-            *self = replacement;
-        }
-
-        let blt_ok = if strategy == WindowsCaptureStrategy::RemoteDesktopWithDisplay
-            || strategy == WindowsCaptureStrategy::HeadlessNoDisplay
-        {
-            unsafe {
-                SetStretchBltMode(self.memory_dc, COLORONCOLOR);
-                StretchBlt(
-                    self.memory_dc,
-                    0,
-                    0,
-                    self.capture_width,
-                    self.capture_height,
-                    self.screen_dc,
-                    0,
-                    0,
-                    self.source_width,
-                    self.source_height,
-                    SRCCOPY | CAPTUREBLT,
-                )
-            }
-        } else {
-            unsafe {
-                BitBlt(
-                    self.memory_dc,
-                    0,
-                    0,
-                    self.capture_width,
-                    self.capture_height,
-                    self.screen_dc,
-                    0,
-                    0,
-                    SRCCOPY | CAPTUREBLT,
-                )
-            }
-        };
-        if blt_ok == 0 {
-            return Err(if strategy == WindowsCaptureStrategy::RemoteDesktopWithDisplay
-                || strategy == WindowsCaptureStrategy::HeadlessNoDisplay
-            {
-                "StretchBlt failed".to_owned()
-            } else {
-                "BitBlt failed".to_owned()
-            });
-        }
-
-        let mut info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: self.capture_width,
-                biHeight: -self.capture_height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                biSizeImage: (self.capture_width * self.capture_height * 4) as u32,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [unsafe { std::mem::zeroed() }; 1],
-        };
-
-        let scanlines = unsafe {
-            GetDIBits(
-                self.memory_dc,
-                self.bitmap,
-                0,
-                self.capture_height as u32,
-                self.bgra.as_mut_ptr() as *mut _,
-                &mut info,
-                DIB_RGB_COLORS,
-            )
-        };
-
-        if scanlines == 0 {
-            return Err("GetDIBits failed".to_owned());
-        }
-
-        let capture_width = self.capture_width as u32;
-        let capture_height = self.capture_height as u32;
-        if capture_width == max_dimensions.0 && capture_height == max_dimensions.1 {
-            ImageBuffer::from_raw(capture_width, capture_height, self.bgra.clone())
-                .ok_or_else(|| "failed to build BGRA frame".to_owned())
-        } else {
-            fit_bgra_frame(capture_width, capture_height, self.bgra.clone(), max_dimensions)
-        }
-    }
-
-    fn create(
-        source_width: i32,
-        source_height: i32,
-        capture_width: i32,
-        capture_height: i32,
-    ) -> Result<Self, String> {
-        let screen_dc = unsafe { GetDC(0 as HWND) };
-        if screen_dc.is_null() {
-            return Err("GetDC failed".to_owned());
-        }
-
-        let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
-        if memory_dc.is_null() {
-            unsafe {
-                ReleaseDC(0 as HWND, screen_dc);
-            }
-            return Err("CreateCompatibleDC failed".to_owned());
-        }
-
-        let bitmap = unsafe { CreateCompatibleBitmap(screen_dc, capture_width, capture_height) };
-        if bitmap.is_null() {
-            unsafe {
-                DeleteDC(memory_dc);
-                ReleaseDC(0 as HWND, screen_dc);
-            }
-            return Err("CreateCompatibleBitmap failed".to_owned());
-        }
-
-        let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
-        if previous.is_null() {
-            unsafe {
-                DeleteObject(bitmap as HGDIOBJ);
-                DeleteDC(memory_dc);
-                ReleaseDC(0 as HWND, screen_dc);
-            }
-            return Err("SelectObject failed".to_owned());
-        }
-
-        Ok(Self {
-            screen_dc,
-            memory_dc,
-            bitmap,
-            previous,
-            source_width,
-            source_height,
-            capture_width,
-            capture_height,
-            bgra: vec![0_u8; (capture_width as usize) * (capture_height as usize) * 4],
-        })
-    }
-}
-
 fn fit_bgra_frame(
     width: u32,
     height: u32,
@@ -717,34 +364,6 @@ fn fit_bgra_frame(
         pixel.swap(0, 2);
     }
     Ok(fitted)
-}
-
-impl Drop for GdiCaptureBackend {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.memory_dc.is_null() && !self.previous.is_null() {
-                SelectObject(self.memory_dc, self.previous);
-            }
-            if !self.bitmap.is_null() {
-                DeleteObject(self.bitmap as HGDIOBJ);
-            }
-            if !self.memory_dc.is_null() {
-                DeleteDC(self.memory_dc);
-            }
-            if !self.screen_dc.is_null() {
-                ReleaseDC(0 as HWND, self.screen_dc);
-            }
-        }
-    }
-}
-
-fn current_screen_size() -> Result<(i32, i32), String> {
-    let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    if width <= 0 || height <= 0 {
-        return Err("invalid screen size".to_owned());
-    }
-    Ok((width, height))
 }
 
 fn should_retry_dxgi(error: &str) -> bool {
@@ -771,14 +390,14 @@ fn detect_capture_strategy() -> WindowsCaptureStrategy {
             logging::append_log(
                 "INFO",
                 "capture",
-                "remote desktop session detected with active display output; probing fast backends first",
+                "remote desktop session detected with active display output; DXGI-only capture enabled",
             );
         }
         WindowsCaptureStrategy::HeadlessNoDisplay => {
             logging::append_log(
                 "WARN",
                 "capture",
-                "remote desktop/headless session detected without active display output; fast capture may require a virtual display",
+                "remote desktop/headless session detected without active display output; DXGI capture may remain unavailable until a real or virtual display appears",
             );
         }
     }
@@ -801,90 +420,18 @@ fn has_active_display_output() -> bool {
     has_screen || has_metrics
 }
 
-fn preferred_backend_for_strategy(
-    strategy: WindowsCaptureStrategy,
-    dxgi_available: bool,
-) -> WindowsCaptureBackendKind {
-    if dxgi_available {
-        return WindowsCaptureBackendKind::DxgiDuplication;
-    }
-
+fn backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
     match strategy {
-        WindowsCaptureStrategy::LocalDisplay | WindowsCaptureStrategy::RemoteDesktopWithDisplay => {
-            WindowsCaptureBackendKind::Win32Gdi
-        }
-        WindowsCaptureStrategy::HeadlessNoDisplay => WindowsCaptureBackendKind::ScreenshotsFallback,
+        WindowsCaptureStrategy::LocalDisplay => "windows-dxgi",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-dxgi",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-dxgi",
     }
 }
 
-fn screenshots_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
+fn unavailable_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
     match strategy {
-        WindowsCaptureStrategy::LocalDisplay => "windows-screenshots-fallback",
-        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-screenshots-fallback",
-        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-screenshots-fallback",
+        WindowsCaptureStrategy::LocalDisplay => "windows-dxgi-unavailable",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-dxgi-unavailable",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-dxgi-unavailable",
     }
-}
-
-fn backend_name_for(
-    strategy: WindowsCaptureStrategy,
-    backend: WindowsCaptureBackendKind,
-) -> &'static str {
-    match backend {
-        WindowsCaptureBackendKind::DxgiDuplication => match strategy {
-            WindowsCaptureStrategy::LocalDisplay => "windows-dxgi",
-            WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-dxgi",
-            WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-dxgi",
-        },
-        WindowsCaptureBackendKind::Win32Gdi => match strategy {
-            WindowsCaptureStrategy::LocalDisplay => "windows-gdi",
-            WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-gdi",
-            WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-gdi",
-        },
-        WindowsCaptureBackendKind::ScreenshotsFallback => "windows-screenshots-fallback",
-    }
-}
-
-fn desired_capture_size(
-    source_width: i32,
-    source_height: i32,
-    max_dimensions: (u32, u32),
-    strategy: WindowsCaptureStrategy,
-) -> (i32, i32) {
-    if strategy == WindowsCaptureStrategy::LocalDisplay {
-        return (source_width, source_height);
-    }
-
-    if source_width <= 0 || source_height <= 0 {
-        return (1, 1);
-    }
-
-    let target =
-        capture_target_dimensions(source_width as u32, source_height as u32, max_dimensions);
-    (target.0.max(1) as i32, target.1.max(1) as i32)
-}
-
-fn capture_target_dimensions(
-    source_width: u32,
-    source_height: u32,
-    max_dimensions: (u32, u32),
-) -> (u32, u32) {
-    if max_dimensions.0 == 0 || max_dimensions.1 == 0 {
-        return (source_width.max(1), source_height.max(1));
-    }
-
-    let scale = (max_dimensions.0 as f32 / source_width as f32)
-        .min(max_dimensions.1 as f32 / source_height as f32)
-        .min(1.0);
-
-    let mut width = ((source_width as f32 * scale).round() as u32).max(1);
-    let mut height = ((source_height as f32 * scale).round() as u32).max(1);
-
-    if width > 1 && width % 2 != 0 {
-        width = width.saturating_sub(1);
-    }
-    if height > 1 && height % 2 != 0 {
-        height = height.saturating_sub(1);
-    }
-
-    (width.max(1), height.max(1))
 }
