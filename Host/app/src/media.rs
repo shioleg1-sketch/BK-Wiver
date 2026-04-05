@@ -296,8 +296,14 @@ impl StreamProfile {
                 backend.starts_with("windows-rdp-") || backend.starts_with("windows-headless-")
             })
             .unwrap_or(false);
+        let is_wgc_backend = backend_hint
+            .map(|backend| backend.contains("-wgc"))
+            .unwrap_or(false);
 
         match self {
+            Self::Fast if is_remote_backend && is_wgc_backend => (854, 480),
+            Self::Balanced if is_remote_backend && is_wgc_backend => (960, 540),
+            Self::Sharp if is_remote_backend && is_wgc_backend => (1280, 720),
             Self::Sharp if is_remote_backend => (1600, 900),
             _ => self.max_dimensions(),
         }
@@ -313,7 +319,8 @@ impl StreamProfile {
             return base;
         };
 
-        let is_slow_backend = backend.contains("-gdi") || backend.contains("screenshots");
+        let is_slow_backend =
+            backend.contains("-gdi") || backend.contains("screenshots") || backend.contains("-wgc");
         if !is_slow_backend {
             return base;
         }
@@ -323,12 +330,15 @@ impl StreamProfile {
         };
 
         match (self, capture_ms) {
+            (Self::Sharp, 241..) => (960, 540),
             (Self::Sharp, 181..) => (1152, 648),
             (Self::Sharp, 121..) => (1280, 720),
             (Self::Sharp, 81..) => (1366, 768),
+            (Self::Balanced, 241..) => (768, 432),
             (Self::Balanced, 181..) => (854, 480),
             (Self::Balanced, 121..) => (960, 540),
             (Self::Balanced, 81..) => (1024, 576),
+            (Self::Fast, 241..) => (512, 288),
             (Self::Fast, 181..) => (640, 360),
             (Self::Fast, 121..) => (768, 432),
             _ => base,
