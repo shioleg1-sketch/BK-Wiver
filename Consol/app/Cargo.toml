@@ -17,8 +17,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = "0.24"
 url = "2"
-# In-process видео декодирование (VP8)
-ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", branch = "master" }
 # Точный таймер
 spin_sleep = "1.3"
 
