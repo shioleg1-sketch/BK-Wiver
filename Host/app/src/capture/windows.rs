@@ -13,7 +13,7 @@ use crate::logging;
 
 use super::{
     CaptureFrame,
-    common::{build_test_frame, fit_frame},
+    common::{ScreenshotsCaptureBackend, build_test_frame, fit_frame},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +33,7 @@ enum CaptureAvailabilityState {
 pub struct WindowsCaptureEngine {
     strategy: WindowsCaptureStrategy,
     dxgi_backend: Option<DxgiCaptureBackend>,
+    screenshots_backend: Option<ScreenshotsCaptureBackend>,
     availability_state: CaptureAvailabilityState,
     consecutive_slow_dxgi_frames: u32,
     next_retry_frame: u32,
@@ -56,7 +57,14 @@ impl WindowsCaptureEngine {
                 None
             }
         };
+        let screenshots_backend = if dxgi_backend.is_none() {
+            init_screenshots_backend(strategy)
+        } else {
+            None
+        };
         let availability_state = if dxgi_backend.is_some() {
+            CaptureAvailabilityState::Ready
+        } else if screenshots_backend.is_some() {
             CaptureAvailabilityState::Ready
         } else {
             unavailable_state_for(strategy)
@@ -85,6 +93,7 @@ impl WindowsCaptureEngine {
         Self {
             strategy,
             dxgi_backend,
+            screenshots_backend,
             availability_state,
             consecutive_slow_dxgi_frames: 0,
             next_retry_frame: 120,
@@ -130,6 +139,14 @@ impl WindowsCaptureEngine {
 
                     return self.unavailable_frame(frame_index);
                 }
+            }
+        }
+
+        if let Some(backend) = self.screenshots_backend.as_mut() {
+            let frame = backend.capture(max_dimensions, frame_index);
+            if !frame.used_fallback {
+                self.availability_state = CaptureAvailabilityState::Ready;
+                return frame;
             }
         }
 
@@ -193,6 +210,7 @@ impl WindowsCaptureEngine {
         };
 
         if self.dxgi_backend.is_some() {
+            self.screenshots_backend = None;
             logging::append_log(
                 "INFO",
                 "capture",
@@ -202,7 +220,14 @@ impl WindowsCaptureEngine {
             self.reset_retry_backoff(frame_index);
             true
         } else {
-            self.availability_state = unavailable_state_for(self.strategy);
+            if self.screenshots_backend.is_none() {
+                self.screenshots_backend = init_screenshots_backend(self.strategy);
+            }
+            if self.screenshots_backend.is_some() {
+                self.availability_state = CaptureAvailabilityState::Ready;
+            } else {
+                self.availability_state = unavailable_state_for(self.strategy);
+            }
             self.bump_retry_backoff(frame_index);
             false
         }
@@ -493,6 +518,31 @@ fn backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
 
 fn unavailable_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
     availability_name_for(strategy, unavailable_state_for(strategy))
+}
+
+fn screenshots_backend_name_for(strategy: WindowsCaptureStrategy) -> &'static str {
+    match strategy {
+        WindowsCaptureStrategy::LocalDisplay => "windows-screenshots",
+        WindowsCaptureStrategy::RemoteDesktopWithDisplay => "windows-rdp-screenshots",
+        WindowsCaptureStrategy::HeadlessNoDisplay => "windows-headless-screenshots",
+    }
+}
+
+fn init_screenshots_backend(strategy: WindowsCaptureStrategy) -> Option<ScreenshotsCaptureBackend> {
+    let backend = ScreenshotsCaptureBackend::with_backend_name(screenshots_backend_name_for(strategy));
+    if backend.backend_name().is_empty() {
+        return None;
+    }
+
+    logging::append_log(
+        "WARN",
+        "capture",
+        format!(
+            "using screenshots fallback backend={} while DXGI is unavailable",
+            backend.backend_name()
+        ),
+    );
+    Some(backend)
 }
 
 fn unavailable_state_for(strategy: WindowsCaptureStrategy) -> CaptureAvailabilityState {

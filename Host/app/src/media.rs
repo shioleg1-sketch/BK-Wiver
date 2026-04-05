@@ -221,6 +221,11 @@ fn capture_state_for_backend(backend: &str) -> (&'static str, String) {
             "virtual_display_pending",
             "Для быстрого захвата требуется виртуальный дисплей.".to_owned(),
         )
+    } else if backend.contains("screenshots") {
+        (
+            "degraded",
+            "Используется программный захват экрана, качество и FPS могут быть ниже.".to_owned(),
+        )
     } else if backend.contains("dxgi-unavailable") {
         (
             "capture_unavailable",
