@@ -173,3 +173,32 @@ message ListAuditEventsRequest {
 message ListAuditEventsResponse {
   repeated AuditEvent events = 1;
 }
+
+// ─── WebRTC extensions (improvement 8) ─────────────────────────────────────
+
+message MediaCapabilities {
+  repeated string codecs = 1;       // e.g. ["h264", "vp8", "vp9", "av1"]
+  uint32 max_width = 2;
+  uint32 max_height = 3;
+  uint32 max_fps = 4;
+  bool hardware_encode = 5;
+  bool data_channel = 6;           // file transfer, clipboard
+  bool audio_channel = 7;
+}
+
+message BandwidthEstimation {
+  uint64 estimated_bitrate_bps = 1;  // current estimate
+  float packet_loss = 2;             // 0.0 - 1.0
+  uint32 rtt_ms = 3;
+  string congestion_state = 4;       // "increasing", "decreasing", "hold"
+}
+
+message MediaFeedback {
+  SessionId session_id = 1;
+  string profile = 2;               // "fast", "balanced", "sharp"
+  string codec = 3;
+  uint32 frames_received = 4;
+  uint32 frames_dropped = 5;
+  uint32 decode_latency_ms = 6;
+  BandwidthEstimation bandwidth = 7;
+}

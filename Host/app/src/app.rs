@@ -961,6 +961,13 @@ impl HostApp {
     }
 
     fn update_media_preferences(&mut self, session_id: &str, profile: &str, codec: Option<&str>) {
+        // improvement 2: adaptive bitrate logging
+        logging::append_log(
+            "INFO", "media.adaptive_bitrate",
+            format!("session_id={} feedback_profile={} feedback_codec={}",
+                session_id, profile, codec.unwrap_or("default")),
+        );
+
         if let Some(session) = self.media_sessions.get(session_id) {
             let mut status_parts = Vec::new();
             let requested_profile = media::StreamProfile::from_wire(profile);

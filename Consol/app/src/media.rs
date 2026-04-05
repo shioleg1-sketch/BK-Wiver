@@ -24,10 +24,13 @@ use url::Url;
 
 use crate::logging;
 
+// Протокол v2: 16-байт заголовок с PTS (обратная совместимость с v1: 8 байт)
 const MEDIA_PACKET_MAGIC: &[u8; 4] = b"BKWM";
-const MEDIA_PACKET_HEADER_LEN: usize = 8;
+const MEDIA_PACKET_HEADER_LEN_V1: usize = 8;
+const MEDIA_PACKET_HEADER_LEN_V2: usize = 16;
 const IVF_HEADER_LEN: usize = 32;
 const H264_DUMP_LIMIT_BYTES: usize = 256 * 1024;
+// improvement 9: VP8 chunking removed, but keep constants for backward compatibility
 const VP8_FRAME_CHUNK_MAGIC: &[u8; 4] = b"BKWC";
 const VP8_FRAME_CHUNK_HEADER_LEN: usize = 16;
 
@@ -423,7 +426,8 @@ pub fn spawn_listener(
                     let mut vp8_decoder: Option<Vp8DecoderSession> = None;
                     let mut vp8_frame_packet_count = 0_u64;
                     let mut vp8_sample_capture: Option<Vp8SampleCapture> = None;
-                    let mut vp8_frame_assembler: Option<Vp8FrameAssembler> = None;
+                    // improvement 9: VP8 chunking removed — frames arrive as single message
+                    let _vp8_frame_assembler: Option<Vp8FrameAssembler> = None;
                     logging::append_log(
                         "INFO",
                         "media",
@@ -519,7 +523,6 @@ pub fn spawn_listener(
                                                 bytes: payload.clone(),
                                                 dumped: false,
                                             });
-                                            vp8_frame_assembler = None;
                                             match Vp8DecoderSession::new(
                                                 width,
                                                 height,
@@ -569,24 +572,8 @@ pub fn spawn_listener(
                                                     ),
                                                 );
                                             }
-                                            let frame_packet = match decode_vp8_frame_chunk(
-                                                &payload,
-                                                &mut vp8_frame_assembler,
-                                            ) {
-                                                Ok(frame_packet) => frame_packet,
-                                                Err(error) => {
-                                                    logging::append_log(
-                                                        "WARN",
-                                                        "media.vp8_decoder",
-                                                        format!(
-                                                            "frame reassembly failed session_id={} error={}",
-                                                            session_id, error
-                                                        ),
-                                                    );
-                                                    vp8_frame_assembler = None;
-                                                    None
-                                                }
-                                            };
+                                            // improvement 9: no chunking — payload is the complete frame
+                                            let frame_packet = Some(payload.clone());
 
                                             if let Some(frame_packet) = frame_packet {
                                                 if let Some(sample) = &mut vp8_sample_capture
@@ -696,7 +683,18 @@ fn media_url(server_url: &str, token: &str, session_id: &str) -> Result<Url, Str
 }
 
 fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec<u8>)> {
-    if bytes.len() < MEDIA_PACKET_HEADER_LEN || &bytes[..4] != MEDIA_PACKET_MAGIC {
+    if bytes.len() < MEDIA_PACKET_HEADER_LEN_V1 || &bytes[..4] != MEDIA_PACKET_MAGIC {
+        return None;
+    }
+
+    let version = bytes[4];
+    let header_len = match version {
+        1 => MEDIA_PACKET_HEADER_LEN_V1,
+        2 => MEDIA_PACKET_HEADER_LEN_V2,
+        _ => return None,
+    };
+
+    if bytes.len() < header_len {
         return None;
     }
 
@@ -711,7 +709,16 @@ fn decode_media_packet(bytes: &[u8]) -> Option<(MediaCodec, MediaPacketKind, Vec
         _ => return None,
     };
 
-    Some((codec, kind, bytes[MEDIA_PACKET_HEADER_LEN..].to_vec()))
+    // v2: flags в bytes[7], PTS в bytes[8..16]
+    // improvement 7: I-frame flag можно использовать для приоритета декодирования
+    let _is_i_frame = version == 2 && (bytes[7] & 0x01) != 0;
+    let _pts_us = if version == 2 && bytes.len() >= MEDIA_PACKET_HEADER_LEN_V2 {
+        i64::from_le_bytes(bytes[8..16].try_into().ok()?)
+    } else {
+        0
+    };
+
+    Some((codec, kind, bytes[header_len..].to_vec()))
 }
 
 fn ensure_h264_decoder(

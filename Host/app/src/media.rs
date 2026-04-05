@@ -14,6 +14,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ffmpeg_next as ffmpeg;
+use ffmpeg_next::codec::{encoder, Id};
+use ffmpeg_next::codec::Context;
+use ffmpeg_next::format::Pixel;
+use ffmpeg_next::Dictionary;
+
 use serde_json::json;
 use tungstenite::{Message, connect};
 use url::Url;
@@ -1526,4 +1532,378 @@ fn send_vp8_frame_chunks(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Improvement 1: In-process H.264 encoding via ffmpeg-next
+// ============================================================================
+// This module provides in-process H.264 encoding using the ffmpeg-next crate,
+// eliminating the overhead of spawning ffmpeg subprocesses. It is designed to
+// eventually replace H264EncoderSession for lower latency and better resource
+// utilization.
+//
+// Integration point: In the encode thread of spawn_stream(), the
+// InProcessH264Encoder can be used instead of H264EncoderSession by calling
+// push_frame() with BGRA/RGBA data and reading encoded packets via
+// drain_packets()/take_packets().
+// ============================================================================
+
+/// In-process H.264 encoder using ffmpeg-next (no subprocess overhead).
+///
+/// This encoder accepts raw BGRA frames via `push_frame()`, converts them to
+/// YUV420P internally via ffmpeg's swscale, and produces H.264 Annex-B packets
+/// that can be sent directly over the wire.
+#[allow(dead_code)]
+pub struct InProcessH264Encoder {
+    encoder: ffmpeg::encoder::Video,
+    scaler: ffmpeg::software::scaling::Context,
+    input_format: Pixel,
+    packet_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    packet_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    width: u32,
+    height: u32,
+    frame_count: i64,
+}
+
+#[allow(dead_code)]
+impl InProcessH264Encoder {
+    /// Create a new in-process H.264 encoder.
+    ///
+    /// - `width`/`height`: output dimensions
+    /// - `fps`: target framerate
+    /// - `bitrate`: target bitrate in bits per second
+    /// - `input_format`: the pixel format of input frames (e.g. `Pixel::BGRA`)
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u64,
+        input_format: Pixel,
+    ) -> Result<Self, String> {
+        ffmpeg::init().map_err(|e| format!("ffmpeg init failed: {e}"))?;
+
+        let output_format = Pixel::YUV420P;
+
+        // Find the H.264 encoder (try HW encoders first, fall back to libx264)
+        let codec = encoder::find(Id::H264)
+            .or_else(|| encoder::find_by_name("h264_nvenc"))
+            .or_else(|| encoder::find_by_name("h264_videotoolbox"))
+            .or_else(|| encoder::find_by_name("h264_qsv"))
+            .ok_or_else(|| "no H.264 encoder found".to_owned())?;
+
+        // Create encoder context
+        let ctx = Context::new_with_codec(codec);
+        let mut enc = ctx.encoder().video().map_err(|e| format!("encoder video: {e}"))?;
+
+        enc.set_width(width);
+        enc.set_height(height);
+        enc.set_format(output_format);
+        enc.set_bit_rate(bitrate as usize);
+        enc.set_max_bit_rate(bitrate as usize);
+        enc.set_frame_rate(Some((fps as i32, 1)));
+        enc.set_time_base((1, fps as i32));
+        enc.set_gop(fps);
+        enc.set_max_b_frames(0);
+
+        let mut opts = Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("tune", "zerolatency");
+        opts.set("profile", "baseline");
+
+        let encoder = enc.open_with(opts).map_err(|e| format!("encoder open: {e}"))?;
+
+        // Create scaler for input format -> YUV420P conversion
+        let scaler = ffmpeg::software::converter(
+            (width, height),
+            input_format,
+            output_format,
+        )
+        .map_err(|e| format!("scaler creation failed: {e}"))?;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        Ok(Self {
+            encoder,
+            scaler,
+            input_format,
+            packet_tx: tx,
+            packet_rx: rx,
+            width,
+            height,
+            frame_count: 0,
+        })
+    }
+
+    /// Push a raw frame (in the input pixel format specified at construction) to the encoder.
+    ///
+    /// The `data` slice should contain `width * height * 4` bytes
+    /// in the input pixel format (e.g. BGRA = 4 bytes per pixel).
+    pub fn push_frame(&mut self, data: &[u8]) -> Result<(), String> {
+        let expected_len = (self.width * self.height * 4) as usize;
+        if data.len() != expected_len {
+            return Err(format!(
+                "frame size mismatch: expected {expected_len} bytes, got {} bytes",
+                data.len()
+            ));
+        }
+
+        // Create input frame and copy data
+        let mut input_frame = ffmpeg::frame::Video::empty();
+        input_frame.set_format(self.input_format);
+        input_frame.set_width(self.width);
+        input_frame.set_height(self.height);
+        input_frame.set_pts(Some(self.frame_count));
+
+        // Copy data into the frame, handling stride
+        let dst_stride = input_frame.stride(0);
+        let src_stride = (self.width * 4) as usize;
+        let h = self.height as usize;
+
+        for row in 0..h {
+            let src_start = row * src_stride;
+            let dst_start = row * dst_stride;
+            let copy_len = src_stride.min(dst_stride);
+            if src_start + copy_len <= data.len() && dst_start + copy_len <= input_frame.data_mut(0).len()
+            {
+                input_frame.data_mut(0)[dst_start..dst_start + copy_len]
+                    .copy_from_slice(&data[src_start..src_start + copy_len]);
+            }
+        }
+
+        // Convert to YUV420P
+        let mut output_frame = ffmpeg::frame::Video::empty();
+        self.scaler
+            .run(&input_frame, &mut output_frame)
+            .map_err(|e| format!("scaler failed: {e}"))?;
+        output_frame.set_pts(Some(self.frame_count));
+
+        // Send frame to encoder
+        self.encoder
+            .send_frame(&output_frame)
+            .map_err(|e| format!("encoder send failed: {e}"))?;
+
+        // Collect encoded packets
+        self.collect_packets();
+
+        self.frame_count += 1;
+        Ok(())
+    }
+
+    /// Drain encoded packets from the encoder.
+    pub fn drain_packets(&self) -> Vec<Vec<u8>> {
+        let mut result = Vec::new();
+        while let Ok(pkt) = self.packet_rx.try_recv() {
+            result.push(pkt);
+        }
+        result
+    }
+
+    /// Take all currently buffered packets.
+    pub fn take_packets(&mut self) -> Vec<Vec<u8>> {
+        self.drain_packets()
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn matches(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+
+    /// Flush the encoder (e.g. before shutdown or resolution change).
+    /// Returns any remaining packets.
+    pub fn flush(&mut self) -> Vec<Vec<u8>> {
+        let _ = self.encoder.send_eof();
+        self.collect_packets();
+        self.drain_packets()
+    }
+
+    fn collect_packets(&mut self) {
+        let mut packet = ffmpeg::Packet::empty();
+        while self.encoder.receive_packet(&mut packet).is_ok() {
+            let data = packet.data().map(|s| s.to_vec()).unwrap_or_default();
+            let _ = self.packet_tx.send(data);
+            packet = ffmpeg::Packet::empty();
+        }
+    }
+}
+
+impl Drop for InProcessH264Encoder {
+    fn drop(&mut self) {
+        let _ = self.encoder.send_eof();
+        self.collect_packets();
+    }
+}
+
+// ============================================================================
+// Improvement 4: NV12/I420 optimized capture path
+// ============================================================================
+// DXGI on Windows can capture frames directly in NV12 format, avoiding the
+// expensive BGRA->YUV conversion in the encoder pipeline. This helper provides
+// an efficient BGRA->NV12 conversion for the current code path, and serves as
+// the target format for future DXGI NV12 native capture support.
+//
+// NV12 layout: full-resolution Y plane followed by interleaved UV plane at
+// half resolution (4:2:0 chroma subsampling).
+// ============================================================================
+
+/// Convert BGRA pixel data to NV12 format.
+///
+/// NV12 consists of:
+/// - Y plane: width * height bytes (full resolution luma)
+/// - UV plane: (width/2) * (height/2) * 2 bytes (interleaved chroma)
+///
+/// Total size: width * height * 3 / 2 bytes
+///
+/// This is a straightforward implementation suitable as a baseline. For
+/// production use, consider SIMD-optimized versions (SSE2/AVX2 on x86,
+/// NEON on ARM) or GPU-accelerated conversion.
+#[allow(dead_code)]
+pub fn convert_bgra_to_nv12(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let y_size = w * h;
+    let uv_width = (w + 1) / 2;
+    let uv_height = (h + 1) / 2;
+    let uv_size = uv_width * uv_height * 2;
+    let total_size = y_size + uv_size;
+
+    let mut nv12 = vec![0u8; total_size];
+    let (y_plane, uv_plane) = nv12.split_at_mut(y_size);
+
+    // RGB to YUV conversion coefficients (BT.601 full range)
+    // Y  =  0.257 * R + 0.504 * G + 0.098 * B + 16
+    // U  = -0.148 * R - 0.291 * G + 0.439 * B + 128
+    // V  =  0.439 * R - 0.368 * G - 0.071 * B + 128
+    //
+    // Using fixed-point arithmetic for performance (multiply by 256):
+    // Y  = (66*R + 129*G +  25*B + 4096) >> 8
+    // U  = (-38*R -  74*G + 112*B + 32768) >> 8
+    // V  = (112*R -  94*G -  18*B + 32768) >> 8
+
+    for y in 0..h {
+        for x in 0..w {
+            let src_idx = (y * w + x) * 4;
+            let b = bgra[src_idx] as i32;
+            let g = bgra[src_idx + 1] as i32;
+            let r = bgra[src_idx + 2] as i32;
+            // bgra[src_idx + 3] is alpha, ignored
+
+            let y_val = ((66 * r + 129 * g + 25 * b + 4096) >> 8).clamp(0, 255) as u8;
+            y_plane[y * w + x] = y_val;
+
+            // UV are subsampled 2x2
+            if x % 2 == 0 && y % 2 == 0 {
+                let uv_x = x / 2;
+                let uv_y = y / 2;
+                let uv_idx = uv_y * uv_width * 2 + uv_x * 2;
+
+                if uv_idx + 1 < uv_plane.len() {
+                    // Average 2x2 block for chroma
+                    let mut sum_u = 0i32;
+                    let mut sum_v = 0i32;
+                    let mut count = 0i32;
+
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let px = x + dx;
+                            let py = y + dy;
+                            if px < w && py < h {
+                                let pi = (py * w + px) * 4;
+                                let pb = bgra[pi] as i32;
+                                let pg = bgra[pi + 1] as i32;
+                                let pr = bgra[pi + 2] as i32;
+                                sum_u += -38 * pr - 74 * pg + 112 * pb + 32768;
+                                sum_v += 112 * pr - 94 * pg - 18 * pb + 32768;
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    let u_val = ((sum_u / count) >> 8).clamp(0, 255) as u8;
+                    let v_val = ((sum_v / count) >> 8).clamp(0, 255) as u8;
+                    uv_plane[uv_idx] = u_val;
+                    uv_plane[uv_idx + 1] = v_val;
+                }
+            }
+        }
+    }
+
+    nv12
+}
+
+/// Convert BGRA to I420 (planar YUV420) format.
+///
+/// I420 consists of three separate planes:
+/// - Y plane: width * height
+/// - U plane: (width/2) * (height/2)
+/// - V plane: (width/2) * (height/2)
+///
+/// Total size: width * height * 3 / 2 bytes
+///
+/// I420 is the standard input format for most software H.264 encoders
+/// (libx264, x264, etc.).
+#[allow(dead_code)]
+pub fn convert_bgra_to_i420(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let y_size = w * h;
+    let uv_width = (w + 1) / 2;
+    let uv_height = (h + 1) / 2;
+    let uv_size = uv_width * uv_height;
+    let total_size = y_size + uv_size * 2;
+
+    let mut i420 = vec![0u8; total_size];
+    let (y_plane, rest) = i420.split_at_mut(y_size);
+    let (u_plane, v_plane) = rest.split_at_mut(uv_size);
+
+    for y in 0..h {
+        for x in 0..w {
+            let src_idx = (y * w + x) * 4;
+            let b = bgra[src_idx] as i32;
+            let g = bgra[src_idx + 1] as i32;
+            let r = bgra[src_idx + 2] as i32;
+
+            let y_val = ((66 * r + 129 * g + 25 * b + 4096) >> 8).clamp(0, 255) as u8;
+            y_plane[y * w + x] = y_val;
+
+            if x % 2 == 0 && y % 2 == 0 {
+                let uv_x = x / 2;
+                let uv_y = y / 2;
+                let uv_idx = uv_y * uv_width + uv_x;
+
+                if uv_idx < u_plane.len() && uv_idx < v_plane.len() {
+                    let mut sum_u = 0i32;
+                    let mut sum_v = 0i32;
+                    let mut count = 0i32;
+
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let px = x + dx;
+                            let py = y + dy;
+                            if px < w && py < h {
+                                let pi = (py * w + px) * 4;
+                                let pb = bgra[pi] as i32;
+                                let pg = bgra[pi + 1] as i32;
+                                let pr = bgra[pi + 2] as i32;
+                                sum_u += -38 * pr - 74 * pg + 112 * pb + 32768;
+                                sum_v += 112 * pr - 94 * pg - 18 * pb + 32768;
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    u_plane[uv_idx] = ((sum_u / count) >> 8).clamp(0, 255) as u8;
+                    v_plane[uv_idx] = ((sum_v / count) >> 8).clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+
+    i420
 }
