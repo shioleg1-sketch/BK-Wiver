@@ -602,6 +602,9 @@ impl H264EncoderSession {
     fn push_raw(&mut self, data: &[u8]) -> Result<(), String> {
         self.stdin
             .write_all(data)
+            .map_err(|error| error.to_string())?;
+        self.stdin
+            .flush()
             .map_err(|error| error.to_string())
     }
 
