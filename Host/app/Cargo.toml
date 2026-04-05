@@ -19,7 +19,6 @@ tungstenite = "0.24"
 url = "2"
 # Оптимизация видео и кодеков
 webp = "0.7"
-h264-raw = "0.1"
 webp-codec = "0.3.1"
 
 [target.'cfg(windows)'.dependencies]
