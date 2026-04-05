@@ -22,9 +22,8 @@ webp = "0.7"
 h264-raw = "0.1"
 webp-codec = "0.3.1"
 # Производительность и мониторинг
-crossbeam-epoch = "0.9"
-frame-buffer = "0.9"
-frame-rate = "1.0"
+crossbeam-channel = "0.5"
+image = "0.24.9"
 
 [target.'cfg(windows)'.dependencies]
 dxgi-capture-rs = { path = "../third_party/dxgi-capture-rs" }
